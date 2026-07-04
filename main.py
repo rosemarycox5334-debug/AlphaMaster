@@ -91,20 +91,40 @@ def save_group_strategy(engine: AlphaEngine, group_name: str, symbols: list[str]
     print(f"  已保存: best_group_{group_name}.json + {len(symbols)} 个品种文件")
 
 
-def train_group(multi_mgr, group_name: str, symbols: list[str]):
-    """训练一个品种组，返回 AlphaEngine。"""
+def train_group(fetcher, group_name: str, symbols: list[str], offline: bool):
+    """训练一个品种组，使用组内独立的 DataManager（不与其他组取时间交集）。
+
+    核心改进：每组单独 load，只对组内品种取时间对齐，避免因 crypto/指数
+    交易时间不同导致 forex 组的 12000 根数据被砍到 3498 根。
+    """
     print(f"\n{'─'*60}")
     print(f"  [{group_name}] 组: {symbols}")
     print(f"{'─'*60}")
 
-    mgr = GroupDataManager(multi_mgr, symbols)
-    if not mgr.symbols:
+    # 临时覆盖 SYMBOLS 只加载本组品种
+    original_symbols = Config.SYMBOLS[:]
+    Config.SYMBOLS = [s for s in symbols if s in original_symbols or True]
+
+    try:
+        group_mgr = MT5DataManager(fetcher)
+        group_mgr.load()
+        actual_symbols = group_mgr.symbols
+        T = group_mgr.raw_dict["open"].shape[1]
+        print(f"  独立加载: {actual_symbols}  T={T} bars")
+    except Exception as e:
+        print(f"  [错误] 数据加载失败: {e}")
+        Config.SYMBOLS = original_symbols
+        return None
+    finally:
+        Config.SYMBOLS = original_symbols  # 恢复原始配置
+
+    if not actual_symbols:
         print(f"  [跳过] 无有效品种")
         return None
 
-    engine = AlphaEngine(data_manager=mgr, target_symbol=group_name)
+    engine = AlphaEngine(data_manager=group_mgr, target_symbol=group_name)
     engine.train()
-    save_group_strategy(engine, group_name, mgr.symbols)
+    save_group_strategy(engine, group_name, actual_symbols)
     return engine
 
 
@@ -128,22 +148,24 @@ def main():
     print(f"{'='*60}")
 
     with MT5DataFetcher(offline=offline) as fetcher:
-        multi_mgr = MT5DataManager(fetcher)
-        multi_mgr.load()
-
         if single and single_sym:
+            # 单品种模式：用全局 multi_mgr
+            multi_mgr = MT5DataManager(fetcher)
+            multi_mgr.load()
             sym    = single_sym[0]
             s_mgr  = SingleSymbolDataManager(multi_mgr, sym)
             engine = AlphaEngine(data_manager=s_mgr, target_symbol=sym)
             engine.train()
 
         elif cross:
+            multi_mgr = MT5DataManager(fetcher)
+            multi_mgr.load()
             engine = AlphaEngine(data_manager=multi_mgr, target_symbol=None)
             engine.train()
             save_group_strategy(engine, "cross_section", multi_mgr.symbols)
 
         else:
-            # 分组训练（默认）
+            # 分组训练：每组独立加载，不共享 DataManager
             groups = getattr(Config, "SYMBOL_GROUPS", {
                 "forex": ["EURUSD", "USDJPY"],
                 "risk":  ["XAUUSD", "US100.cash", "US500.cash"],
@@ -153,7 +175,7 @@ def main():
 
             results = {}
             for gname, gsyms in groups.items():
-                eng = train_group(multi_mgr, gname, gsyms)
+                eng = train_group(fetcher, gname, gsyms, offline)
                 if eng:
                     results[gname] = {
                         "score":   eng.best_score,

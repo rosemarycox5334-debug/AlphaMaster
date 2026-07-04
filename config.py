@@ -85,7 +85,7 @@ class Config:
 
     # ── 数据参数 ──────────────────────────────────────────
     TIMEFRAME             = mt5.TIMEFRAME_H1   # K 线周期
-    BARS_COUNT            = 12000  # 每品种拉取的历史 K 线数
+    BARS_COUNT            = 12000  # 每品种拉取的历史 K 线数（已改为按组独立加载，不取交集）
     MIN_BARS              = 3000   # 低于此值的品种被排除
     DATA_REFRESH_INTERVAL = 300    # 秒，实盘数据刷新间隔
     KLINE_CACHE_DIR       = r"D:\K线数据"  # 本地 K 线缓存目录

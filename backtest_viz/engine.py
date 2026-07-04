@@ -124,8 +124,8 @@ class BacktestEngine:
 
         # numpy 转换（便于后续图表处理）
         factor_np   = factor_1d.detach().float().numpy()
-        signal_np   = np.tanh(factor_np)
-        position_np = np.sign(signal_np)
+        # 连续仓位模式：tanh 直接作为仓位比例，与训练 backtest.py 完全一致
+        position_np = np.tanh(factor_np)
 
         open_np   = raw_dict["open"].float().numpy()
         high_np   = raw_dict["high"].float().numpy()

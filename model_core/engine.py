@@ -501,11 +501,11 @@ class AlphaEngine:
                     step_max_val = final_val;  step_best_f = fml
 
                 if final_val > self.best_score:
-                    # P3：冠军选择稳健性校验——在场时间 < 10% 的稀疏公式拒绝成为冠军
+                    # P3：冠军选择稳健性校验——连续仓位均值 < 5% 的极稀疏公式拒绝登顶
                     pos_check = compute_target_positions_stateless(res)
-                    exposure = (pos_check.abs() > 0).float().mean().item()
-                    if exposure < 0.10:
-                        pass   # 稀疏公式：参与梯度更新但不登顶
+                    exposure = pos_check.abs().mean().item()  # 连续仓位：均值
+                    if exposure < 0.05:
+                        pass   # 极稀疏：参与梯度更新但不登顶
                     else:
                         self.best_score   = final_val
                         self.best_formula = fml

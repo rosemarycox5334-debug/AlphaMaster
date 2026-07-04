@@ -234,20 +234,16 @@ class MT5Backtest:
         return float(freq_score + hold_bonus)
 
     def _exposure_penalty(self, position: Tensor) -> float:
-        """在场时间惩罚：非零仓位占比应在 [15%, 70%] 范围内。
+        """在场时间惩罚（仅下限，无上限）：收益优先模式。
 
-        P0a 新增：防止稀疏交易（<15%在场）靠偶发盈利刷高 Sortino。
-        同时抑制频繁全仓（>70%在场）的过度交易风格。
-        返回值：[-2.0, 0.0]，在合理范围内为 0。
+        只惩罚极稀疏交易（<10%在场），不惩罚高在场时间。
+        高在场时间（满仓趋势跟踪）是外汇市场最赚钱的形态之一，不应受罚。
         """
         flat = position.reshape(-1).abs()
-        exposure = (flat > 0).float().mean().item()
-        if exposure < 0.15:
-            # 稀疏：0% → -2.0，15% → 0.0
-            return float((exposure / 0.15 - 1.0) * 2.0)
-        elif exposure > 0.70:
-            # 过密：70% → 0.0，100% → -1.0
-            return float(-((exposure - 0.70) / 0.30) * 1.0)
+        exposure = flat.mean().item()   # 连续仓位：均值即平均持仓量
+        if exposure < 0.10:
+            # 极稀疏：平均持仓 < 10% → 线性惩罚 [-2, 0)
+            return float((exposure / 0.10 - 1.0) * 2.0)
         return 0.0
 
     def _turnover_penalty(self, turnover: Tensor) -> Tensor:
@@ -328,39 +324,48 @@ class MT5Backtest:
         position:   Tensor,
         eval_bars:  int = 0,
     ) -> Tensor:
-        """统一的多目标评分。
+        """收益优先的多目标评分（2026-07-04 重构）。
 
-        N=1 时（单品种训练模式）：跳过多品种统计，直接用 Sortino+Calmar+IC+hold_quality。
-        N>1 时（组合模式）：加入 symbol_consistency 和 cost_stress。
-        P0a 新增：所有模式都加入 exposure_penalty，防止稀疏公式刷分。
+        核心改变：加入年化绝对收益项（权重 0.40），这是最主要的优化目标。
+        Sortino/Calmar 权重大幅下调，仅作为风险调整辅助。
+        clamp 上限放开（Sortino 40→20 保持，收益无上限）。
+
+        N=1 单品种模式权重略有不同（无 symbol_consistency/cost_stress）。
         """
         N = pnl.shape[0]
+
+        # ── 绝对收益（年化 log return）──────────────────────────────────
+        # 连续仓位 pnl = position * target_ret - turnover * cost
+        # 年化因子 = periods_per_year / T
+        T_bars = pnl.shape[1]
+        ann_factor = self.periods_per_year / max(T_bars, 1)
+        ann_ret = pnl.mean() * ann_factor   # 标量张量，无截断
+
         port_sortino = self._sortino(pnl)
         port_calmar  = self._calmar(pnl)
         ts_ic        = self._ts_ic_stability(factors, target_ret)
         tq           = self._turnover_quality(position)
-        exp_pen      = self._exposure_penalty(position)   # P0a：在场时间惩罚
+        exp_pen      = self._exposure_penalty(position)
 
         if N == 1:
             return (
-                0.45 * port_sortino
-                + 0.25 * port_calmar
-                + 0.20 * ts_ic
-                + 0.10 * tq
-                + exp_pen          # 直接相加，范围 [-2, 0]
+                0.40 * ann_ret           # 主目标：年化绝对收益
+                + 0.20 * port_sortino    # 风险调整辅助
+                + 0.15 * port_calmar     # 回撤控制辅助
+                + 0.15 * ts_ic           # IC 预测方向
+                + 0.10 * tq              # 交易频率质量
+                + exp_pen                # 稀疏惩罚
             )
 
         per_sym_sortino     = []
         per_sym_trade_count = []
         for n in range(N):
             per_sym_sortino.append(self._sortino(pnl[n]).item())
-            pos_n = position[n].tolist()
-            trades, prev = 0, 0
-            for v in pos_n:
-                vi = int(v)
-                if vi != 0 and vi != prev:
-                    trades += 1
-                prev = vi if vi != 0 else prev
+            # 连续仓位下，用 |position| 变化来估算交易次数
+            pos_n = position[n].abs()
+            # 视 tanh 输出均值作为持仓量，换手次数用前后差异估计
+            diff = (pos_n[1:] - pos_n[:-1]).abs()
+            trades = int((diff > 0.1).sum().item())
             per_sym_trade_count.append(trades)
 
         sym_cons = self._symbol_consistency(
@@ -369,13 +374,14 @@ class MT5Backtest:
         cost_s   = self._cost_stress(position, target_ret)
 
         return (
-            0.35 * port_sortino
-            + 0.20 * port_calmar
-            + 0.15 * ts_ic
-            + 0.10 * sym_cons
-            + 0.10 * cost_s
-            + 0.10 * tq
-            + exp_pen              # P0a：在场时间惩罚
+            0.40 * ann_ret               # 主目标：年化绝对收益
+            + 0.15 * port_sortino        # 风险调整辅助
+            + 0.10 * port_calmar         # 回撤控制辅助
+            + 0.10 * ts_ic               # IC 预测方向
+            + 0.10 * sym_cons            # 品种一致性
+            + 0.05 * cost_s              # 成本压力测试
+            + 0.10 * tq                  # 交易频率质量
+            + exp_pen                    # 稀疏惩罚
         )
 
     # ──────────────────────────────────────────────────────────────────────

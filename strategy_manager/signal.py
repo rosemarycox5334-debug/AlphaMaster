@@ -2,74 +2,48 @@
 strategy_manager/signal.py — 回测与实盘共享的信号计算模块
 
 提供：
-  compute_target_positions(factors, prev_positions)  →  {-1, 0, +1} 目标仓位张量
+  compute_target_positions(factors, prev_positions)  →  连续仓位 [-1, +1] 张量
   reconcile_action(current, target)                  →  动作字符串
 
-信号逻辑采用 Neutral Band（带滞后出场）：
-  factor > ENTRY_THRESHOLD  → 做多
-  factor < -ENTRY_THRESHOLD → 做空
-  否则保持当前仓位（滞后出场），直到 |factor| < EXIT_THRESHOLD 才平仓
-
-这比 sign(tanh(factor)) 的"全程满仓"策略降低约 30-40% 的噪声换手。
+信号逻辑（收益优先模式，2026-07-04 重构）：
+  旧模式（Neutral Band）：tanh → sign → {-1, 0, +1} 三档，天花板锁死在 1 倍仓。
+  新模式（连续仓位）：factor 直接经 tanh 压缩到 (-1, +1) 作为仓位比例。
+    - factor 越强 → 仓位比例越大，允许"加码"
+    - 不设 Neutral Band，让模型自由决定在场时间
+    - 回测与实盘共用同一逻辑，消除两者差异
+  训练时用 tanh(factor) 作为连续仓位，回测也一致，避免训练/回测目标函数不对齐。
 """
 from __future__ import annotations
 
 import torch
 from torch import Tensor
 
-# ── 信号阈值 ──────────────────────────────────────────────────────────────────
-# 标准化后因子值域 [-3, 3]，选 0.6 入场 / 0.2 出场
-ENTRY_THRESHOLD: float = 0.3   # 降低入场阈值：标准化后因子 std≈1，±0.3 能捕捉约50%时间
-EXIT_THRESHOLD:  float = 0.1   # 对应降低出场阈值
+# ── 保留实盘用的阈值参数（实盘 Runner 可能还读取这些常量）──────────────────
+ENTRY_THRESHOLD: float = 0.3
+EXIT_THRESHOLD:  float = 0.1
 
 
 def compute_target_positions(
     factors:        Tensor,
     prev_positions: Tensor | None = None,
 ) -> Tensor:
-    """将因子张量转换为目标仓位 {-1, 0, +1}（Neutral Band 逻辑）。
+    """将因子张量转换为连续仓位 [-1, +1]（收益优先模式）。
 
-    设计决策：
-    - 训练/回测（stateless）：中间区 [EXIT, ENTRY] 直接输出 0（空仓）。
-      使得回测可向量化，性能高，且行为保守（比实盘少交易）。
-    - 实盘（传入 prev_positions）：中间区保持前仓（滞后出场），
-      降低噪声换手。实盘比回测多持一点仓，结果 >= 回测是合理预期。
-
-    回测与实盘之间的这个微小差异是有意为之的——
-    回测保守估计，实盘更宽松，不是 bug 而是安全边际。
+    新逻辑：position = tanh(factor)，连续仓位，强信号→大仓。
+    prev_positions 参数保留兼容性，连续模式下不影响计算。
 
     Args:
         factors:        [N, T] 或 [N] 的因子张量。
-        prev_positions: [N, T] 或 [N] 的前一时刻仓位（实盘用，None=stateless）。
+        prev_positions: 保留参数，连续模式下忽略。
     """
-    # 开多区
-    long_mask  = factors >  ENTRY_THRESHOLD
-    # 开空区
-    short_mask = factors < -ENTRY_THRESHOLD
-    # 平仓区
-    exit_mask  = factors.abs() < EXIT_THRESHOLD
+    return torch.tanh(factors)
 
     if prev_positions is None:
         # 训练模式：无状态，中间区直接空仓
         pos = torch.zeros_like(factors)
         pos[long_mask]  =  1.0
-        pos[short_mask] = -1.0
-        # exit_mask 区域保持 0（已初始化为 0）
-    else:
-        # 实盘/回测模式：中间区保持前仓（滞后出场）
-        pos = prev_positions.float().clone()
-        pos[long_mask]  =  1.0
-        pos[short_mask] = -1.0
-        pos[exit_mask]  =  0.0
-
-    return pos.sign()   # 确保值为 {-1, 0, +1}
-
-
 def compute_target_positions_stateless(factors: Tensor) -> Tensor:
-    """无状态版本，供训练回测快速计算（不需要前仓状态）。
-
-    等价于 compute_target_positions(factors, prev_positions=None)。
-    """
+    """无状态版本，供训练回测快速计算（连续仓位模式）。"""
     return compute_target_positions(factors, prev_positions=None)
 
 

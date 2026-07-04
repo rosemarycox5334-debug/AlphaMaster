@@ -44,13 +44,12 @@ class ModelConfig:
     INPUT_DIM: int = FORMULA_VOCAB.feature_count  # == 10
 
     # ── Reward：Sortino 为主，IC 做门控 ──────────────────────────────────
-    # P2 加强：IC_GATE_THRESH 0.002→0.01，负 IC 惩罚 0.85→0.30。
-    # 原来阈值 0.002 太低（几乎没门控），负 IC 惩罚 ×0.85 不足以淘汰反向预测因子。
-    # 修改后：IC 方向明确错误（<-0.01）时 reward 直接打 3 折，让反向因子无法登顶。
+    # IC_NEG_MULT 0.30→0.50：0.30 对反向因子惩罚过重，可能误杀非线性高收益因子。
+    # 收益优先模式下，只要年化收益是正的，适当负 IC 可以接受。
     REWARD_ALPHA:      float = 1.0
-    IC_GATE_THRESH:    float = 0.01   # 0.002 → 0.01
+    IC_GATE_THRESH:    float = 0.01
     IC_GATE_MULT:      float = 1.15
-    IC_NEG_MULT:       float = 0.30   # 0.85 → 0.30
+    IC_NEG_MULT:       float = 0.50   # 0.30 → 0.50
 
     # ── 熵保护（大空间加强版）──────────────────────────────────────────
     # ENTROPY_COEFF_MAX 0.5→1.0：加倍探索压力，对抗大 vocab 的过早收敛。
