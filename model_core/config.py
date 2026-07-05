@@ -38,7 +38,7 @@ class ModelConfig:
     #   3. 更大精英池（60）保留更多历史最优
     BATCH_SIZE      = 192   # 每步采样公式数（原 128，1.5x 提升覆盖率）
     TRAIN_STEPS     = 5000  # 每组训练步数（原 3000）
-    MAX_FORMULA_LEN = 8     # 公式长度上限（暂保持 8，防过拟合）
+    MAX_FORMULA_LEN = 8     # 公式长度上限：保持 8（10 会导致 CPU 训练慢 3 倍）
 
     # ── 特征维度（由 vocab.py 自动派生，无需手动修改）──────────────────
     INPUT_DIM: int = FORMULA_VOCAB.feature_count  # == 10
@@ -78,6 +78,32 @@ class ModelConfig:
     # 配合 engine.py：超过 MAX_RESTARTS 后不再 Early Stop，改为强扰动继续训练。
     MAX_RESTARTS:   int   = 25
     RESTART_NOISE:  float = 0.1
+
+    # ── 自适应噪声：Best 停滞时自动增大扰动 ─────────────────────────────
+    # stagnation_window: 判断停滞的步数窗口
+    # noise_min / noise_max: 噪声下界和上界
+    # noise_boost: 停滞时噪声提升倍率
+    ADAPTIVE_NOISE:      bool  = True
+    STAGNATION_WINDOW:   int   = 500
+    NOISE_MIN:           float = 0.05
+    NOISE_MAX:           float = 0.40
+    NOISE_BOOST_FACTOR:  float = 1.0   # noise += 0.1 * (stagnation / window)
+
+    # ── 重启时部分重置参数：保留底层，扰动顶层 ───────────────────────────
+    PARTIAL_RESET:       bool  = True
+    PARTIAL_RESET_LAYERS: tuple = ("ln_f", "mtp_head", "head_critic")
+
+    # ── Elite Replay 衰减：旧 elite 采样权重随时间衰减 ──────────────────
+    ELITE_DECAY:         bool  = True
+    ELITE_DECAY_HALF_LIFE: int = 1000  # 每 1000 步旧 elite 权重减半
+
+    # ── 多起点并行（Island）──────────────────────────────────────────────
+    # 注意：Island 模式在 CPU 训练下会让总时间变成 N 倍（islands 串行），
+    # 对于 index 这类大数组（T=32076）会变得极慢。当前默认关闭，保留配置开关。
+    N_ISLANDS:              int   = 1
+    MIGRATION_INTERVAL:     int   = 500
+    MIGRATION_TOP_K:        int   = 5
+    # island 默认关闭，避免用户误开导致速度爆炸
 
     # ── 因子去相关参数 ────────────────────────────────────────────────
     FACTOR_TOP_K:     int   = 25

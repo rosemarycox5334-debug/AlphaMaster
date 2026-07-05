@@ -176,9 +176,13 @@ class AlphaEngine:
         self.factor_pool: list[tuple[float, int, torch.Tensor]] = []
         self._factor_pool_counter = 0
 
-        # Elite Replay pool: (val_score, counter, formula_tokens)
-        self._elite_pool: list[tuple[float, int, list[int]]] = []
+        # Elite Replay pool: (val_score, counter, formula_tokens, birth_step)
+        self._elite_pool: list[tuple[float, int, list[int], int]] = []
         self._elite_counter = 0
+
+        # 自适应噪声：记录 best 刷新步数
+        self._best_update_step = 0
+        self._stagnation_steps = 0
 
     # ── IC computation ────────────────────────────────────────────────────────
 
@@ -240,28 +244,29 @@ class AlphaEngine:
 
     @staticmethod
     def _dedup_elite_pool(
-        pool: list[tuple[float, int, list[int]]]
-    ) -> list[tuple[float, int, list[int]]]:
+        pool: list[tuple[float, int, list[int], int]]
+    ) -> list[tuple[float, int, list[int], int]]:
         """对精英池去重：相同 tokens 只保留得分最高的一条，重建最小堆。"""
-        best: dict[str, tuple[float, int, list[int]]] = {}
-        for sc, cnt, toks in pool:
+        best: dict[str, tuple[float, int, list[int], int]] = {}
+        for sc, cnt, toks, birth in pool:
             key = str(toks)
             if key not in best or sc > best[key][0]:
-                best[key] = (sc, cnt, toks)
+                best[key] = (sc, cnt, toks, birth)
         deduped = list(best.values())
         heapq.heapify(deduped)
         return deduped
 
-    def _update_elite_pool(self, val_score: float, formula: list[int]) -> None:
+    def _update_elite_pool(self, val_score: float, formula: list[int], step: int = 0) -> None:
         """维护精英公式池（最小堆，Top-ELITE_POOL_SIZE 个历史最优公式，自动去重）。
 
         去重逻辑：若 formula 已在池中，只在新得分更高时原地更新，不插入重复副本。
         这防止了单一公式垄断 elite pool，保持多样性。
+        新增：记录 birth_step 用于 elite decay。
         """
         k = ModelConfig.ELITE_POOL_SIZE
 
         # 检查是否已有相同公式
-        for idx, (sc, cnt, toks) in enumerate(self._elite_pool):
+        for idx, (sc, cnt, toks, birth) in enumerate(self._elite_pool):
             if toks == formula:
                 if val_score <= sc:
                     return  # 已有更高分的相同公式，不更新
@@ -271,7 +276,7 @@ class AlphaEngine:
                 heapq.heapify(self._elite_pool)  # O(k)，k≤20，可接受
                 break
 
-        entry = (val_score, self._elite_counter, list(formula))
+        entry = (val_score, self._elite_counter, list(formula), step)
         self._elite_counter += 1
         if len(self._elite_pool) < k:
             heapq.heappush(self._elite_pool, entry)
@@ -312,21 +317,26 @@ class AlphaEngine:
 
     # ── Main training loop ────────────────────────────────────────────────────
 
-    def train(self, start_step: int = 0):
+    def train(self, start_step: int = 0, end_step: int | None = None,
+              migration_hook=None, verbose_header: bool = True):
         if self.data_manager is None:
             raise RuntimeError("AlphaEngine requires a data_manager.")
 
-        print("🚀 Starting MT5 Alpha Mining" +
-              (" with LoRD Regularization..." if self.use_lord else "..."))
-        print(f"   Entropy: thresh={ModelConfig.ENTROPY_COLLAPSE_THRESH}  "
-              f"coeff_max={ModelConfig.ENTROPY_COEFF_MAX}  "
-              f"collapse_steps={ModelConfig.ENTROPY_COLLAPSE_STEPS}")
-        print(f"   Elite Replay: frac={ModelConfig.ELITE_REPLAY_FRAC}  "
-              f"pool={ModelConfig.ELITE_POOL_SIZE}")
-        print(f"   IC gate: ±{ModelConfig.IC_GATE_THRESH}  "
-              f"pos×{ModelConfig.IC_GATE_MULT}  neg×{ModelConfig.IC_NEG_MULT}")
-        print(f"   Max restarts: {ModelConfig.MAX_RESTARTS}  "
-              f"noise={ModelConfig.RESTART_NOISE}")
+        if end_step is None:
+            end_step = ModelConfig.TRAIN_STEPS
+
+        if verbose_header:
+            print("🚀 Starting MT5 Alpha Mining" +
+                  (" with LoRD Regularization..." if self.use_lord else "..."))
+            print(f"   Entropy: thresh={ModelConfig.ENTROPY_COLLAPSE_THRESH}  "
+                  f"coeff_max={ModelConfig.ENTROPY_COEFF_MAX}  "
+                  f"collapse_steps={ModelConfig.ENTROPY_COLLAPSE_STEPS}")
+            print(f"   Elite Replay: frac={ModelConfig.ELITE_REPLAY_FRAC}  "
+                  f"pool={ModelConfig.ELITE_POOL_SIZE}")
+            print(f"   IC gate: ±{ModelConfig.IC_GATE_THRESH}  "
+                  f"pos×{ModelConfig.IC_GATE_MULT}  neg×{ModelConfig.IC_NEG_MULT}")
+            print(f"   Max restarts: {ModelConfig.MAX_RESTARTS}  "
+                  f"noise={ModelConfig.RESTART_NOISE}")
 
         T     = self.data_manager.target_ret.shape[1]
         folds = _build_walk_forward_folds(T, self.n_folds,
@@ -334,13 +344,14 @@ class AlphaEngine:
         use_wf = len(folds) > 1 and not (
             folds[0]["train_start"] == 0 and folds[0]["train_end"] == T
         )
-        if use_wf:
-            print(f"   Walk-Forward: {len(folds)} 折  T={T}")
-            for k, f in enumerate(folds):
-                print(f"  折{k+1}: train[0,{f['train_end']}) "
-                      f"gap={f['gap']} val[{f['val_start']},{f['val_end']})")
-        else:
-            print(f"   退化为全量评估（T={T}）")
+        if verbose_header:
+            if use_wf:
+                print(f"   Walk-Forward: {len(folds)} 折  T={T}")
+                for k, f in enumerate(folds):
+                    print(f"  折{k+1}: train[0,{f['train_end']}) "
+                          f"gap={f['gap']} val[{f['val_start']},{f['val_end']})")
+            else:
+                print(f"   退化为全量评估（T={T}）")
 
         # 因果安全：features.py 的 _robust_norm 已改为滚动因果实现
         # 每个 t 的归一化参数只用 [t-w+1..t]，walk-forward 折叠切片无泄露
@@ -350,13 +361,13 @@ class AlphaEngine:
         n_elite = max(1, int(bs * ModelConfig.ELITE_REPLAY_FRAC))
         n_new   = bs - n_elite
 
-        remaining = ModelConfig.TRAIN_STEPS - start_step
+        remaining = end_step - start_step
         if remaining <= 0:
-            print(f"[Train] start_step={start_step} >= TRAIN_STEPS={ModelConfig.TRAIN_STEPS}, nothing to do.")
+            print(f"[Train] start_step={start_step} >= end_step={end_step}, nothing to do.")
             return
 
-        pbar               = tqdm(range(start_step, ModelConfig.TRAIN_STEPS),
-                                  total=ModelConfig.TRAIN_STEPS,
+        pbar               = tqdm(range(start_step, end_step),
+                                  total=end_step,
                                   initial=start_step)
         low_entropy_streak = 0
 
@@ -386,8 +397,18 @@ class AlphaEngine:
             # ── Part B: Elite Replay ─────────────────────────────────
             elite_formulas: list[list[int]] = []
             if self._elite_pool and n_elite > 0:
-                ps = [e[0] for e in self._elite_pool]
-                pt = [e[2] for e in self._elite_pool]
+                ps = []
+                pt = []
+                weights = []
+                for sc, cnt, toks, birth in self._elite_pool:
+                    age = max(0, step - birth)
+                    decay = 1.0
+                    if ModelConfig.ELITE_DECAY:
+                        half = max(1, ModelConfig.ELITE_DECAY_HALF_LIFE)
+                        decay = 0.5 ** (age / half)
+                    ps.append(sc)
+                    pt.append(toks)
+                    weights.append(decay)
                 ps_min  = min(ps)
                 ps_max  = max(ps)
                 # 软温度采样：避免最高分公式垄断
@@ -398,12 +419,23 @@ class AlphaEngine:
                 else:
                     normalized = [1.0] * len(ps)
                 temp = 0.5
-                exp_s = [2.0 ** (v / temp) for v in normalized]  # 2^(v/T)
+                exp_s = [weights[i] * (2.0 ** (normalized[i] / temp)) for i in range(len(ps))]
                 exp_sum = sum(exp_s)
                 probs = [e / exp_sum for e in exp_s]
                 idx_e   = random.choices(range(len(self._elite_pool)),
                                          weights=probs, k=n_elite)
                 elite_formulas = [pt[i] for i in idx_e]
+
+                # 详细日志：Elite Replay 衰减状态（每 100 步打印一次）
+                if step % 100 == 0:
+                    avg_decay = sum(weights) / len(weights)
+                    max_age = max(max(0, step - birth) for _, _, _, birth in self._elite_pool)
+                    age_list = sorted([max(0, step - birth) for _, _, _, birth in self._elite_pool])
+                    tqdm.write(
+                        f"[EliteReplay @ step {step}] pool={len(self._elite_pool)} "
+                        f"avg_decay={avg_decay:.3f} max_age={max_age} ages={age_list} "
+                        f"sampled_scores=[{', '.join(f'{ps[i]:.3f}' for i in idx_e[:3])}...]"
+                    )
             else:
                 elite_formulas = seqs_new[:n_elite].tolist()
 
@@ -505,20 +537,29 @@ class AlphaEngine:
                     pos_check = compute_target_positions_stateless(res)
                     exposure = pos_check.abs().mean().item()  # 连续仓位：均值
                     if exposure < 0.05:
-                        pass   # 极稀疏：参与梯度更新但不登顶
+                        # 极稀疏：参与梯度更新但不登顶，但记录日志方便排查
+                        tqdm.write(
+                            f"[SparseSkip @ step {step}] Val={final_val:.3f} "
+                            f"IC={ic_i:.4f} Exp={exposure:.1%} | too sparse to be king"
+                        )
+                        pass
                     else:
+                        old_best = self.best_score
                         self.best_score   = final_val
                         self.best_formula = fml
                         self._best_snapshot = copy.deepcopy(self.model.state_dict())
+                        self._best_update_step = step
+                        self._stagnation_steps = 0
                         self._update_factor_pool(final_val, res)
                         # 即时保存：任何时刻进程退出都有最新最优公式（防终端回收丢策略）
                         self._save_strategy_live()
                         tqdm.write(
-                            f"[!] New King: Val={final_val:.3f} IC={ic_i:.4f} "
-                            f"Exp={exposure:.1%} | "
+                            f"[!] New King @ step {step}: Val={final_val:.3f} "
+                            f"(was {old_best:.3f}, +{final_val-old_best:.3f}) "
+                            f"IC={ic_i:.4f} Exp={exposure:.1%} | "
                             f"{fml}\n    {self._decode_formula(fml)}"
                         )
-                self._update_elite_pool(final_val, fml)
+                self._update_elite_pool(final_val, fml, step)
 
 
             # ── Part D: REINFORCE gradient update ────────────────────
@@ -568,17 +609,20 @@ class AlphaEngine:
             bis_ = sum(bis)  / len(bis)  if bis  else 0.0
             bsor_= sum(bsor) / len(bsor) if bsor else 0.0
 
+            self._stagnation_steps = step - self._best_update_step
             tqdm.write(
-                f"[{step+1}/{ModelConfig.TRAIN_STEPS}] "
+                f"[{step+1}/{end_step}] "
                 f"new={n_new} elite={n_elite} | "
                 f"ok={ok_cnt} none={none_cnt} const={const_cnt} | "
                 f"Rew={avg_rew:.3f} Val={avg_val:.3f} | "
                 f"IC={bim:.4f} | H={ent_val:.3f}(c={ent_coeff:.3f}) | "
-                f"Best={self.best_score:.3f} epool={len(self._elite_pool)}"
+                f"Best={self.best_score:.3f} stagnation={self._stagnation_steps} "
+                f"epool={len(self._elite_pool)} restarts={self._restart_count}"
             )
             pbar.set_postfix({
                 'Val': f"{avg_val:.3f}", 'Best': f"{self.best_score:.3f}",
                 'H':   f"{ent_val:.2f}", 'IC':   f"{bim:.4f}",
+                'stag': f"{self._stagnation_steps}",
             })
 
             if self.use_lord and step % 10 == 0:
@@ -609,83 +653,124 @@ class AlphaEngine:
                 with open(save_path, "w") as fp:
                     json.dump(strategy_data, fp, indent=2)
 
-            if (step + 1) % 20 == 0 or (step + 1) == ModelConfig.TRAIN_STEPS:
+            if (step + 1) % 20 == 0 or (step + 1) == end_step:
                 ckpt = self.save_checkpoint(step + 1)
-                tqdm.write(f"[Checkpoint] → {ckpt}")
+                tqdm.write(f"[Checkpoint] → {ckpt} (best={self.best_score:.3f})")
 
+            # ── Part F: Migration hook（多岛训练时交换精英）────────────
+            if migration_hook is not None and (step + 1) % ModelConfig.MIGRATION_INTERVAL == 0:
+                tqdm.write(f"[MigrationHook @ step {step+1}] calling registered hook")
+                migration_hook(self, step + 1)
 
-            # ── Part F: Entropy collapse detection & restart ─────────
+            # ── Part G: Entropy collapse detection & restart ─────────
             if ent_val < ModelConfig.ENTROPY_COLLAPSE_THRESH:
                 low_entropy_streak += 1
             else:
                 low_entropy_streak  = 0
 
             if low_entropy_streak >= ModelConfig.ENTROPY_COLLAPSE_STEPS:
+                # ── 自适应噪声：根据 stagnation 调整 ─────────────────────
+                self._stagnation_steps = step - self._best_update_step
+                stagnation_ratio = self._stagnation_steps / max(1, ModelConfig.STAGNATION_WINDOW)
+                base_noise = ModelConfig.RESTART_NOISE
+                if ModelConfig.ADAPTIVE_NOISE:
+                    raw_noise = base_noise + ModelConfig.NOISE_BOOST_FACTOR * 0.1 * min(stagnation_ratio, 3.0)
+                    noise = max(ModelConfig.NOISE_MIN, min(ModelConfig.NOISE_MAX, raw_noise))
+                else:
+                    noise = base_noise
+
                 max_r = ModelConfig.MAX_RESTARTS
                 if self._restart_count < max_r:
                     self._restart_count  += 1
                     low_entropy_streak    = 0
-                    noise = ModelConfig.RESTART_NOISE
                     if self._best_snapshot is not None:
                         self.model.load_state_dict(self._best_snapshot)
                         with torch.no_grad():
-                            for nm, p in self.model.named_parameters():
-                                if 'ffn' in nm:
-                                    p.add_(torch.randn_like(p) * noise)
-                        tqdm.write(f"[Restart {self._restart_count}/{max_r}] "
-                                   f"快照恢复+FFN扰动(σ={noise})")
+                            if ModelConfig.PARTIAL_RESET:
+                                perturbed_layers = []
+                                for nm, p in self.model.named_parameters():
+                                    if any(k in nm for k in ModelConfig.PARTIAL_RESET_LAYERS):
+                                        p.add_(torch.randn_like(p) * noise)
+                                        perturbed_layers.append(nm)
+                            else:
+                                perturbed_layers = []
+                                for nm, p in self.model.named_parameters():
+                                    if 'ffn' in nm or 'attention' in nm or nm.startswith('blocks'):
+                                        p.add_(torch.randn_like(p) * noise)
+                                        perturbed_layers.append(nm)
+                        tqdm.write(
+                            f"[Restart {self._restart_count}/{max_r} @ step {step}] "
+                            f"mode={'partial' if ModelConfig.PARTIAL_RESET else 'FFN/Attn'} "
+                            f"noise={noise:.4f}(base={base_noise:.3f}, ratio={stagnation_ratio:.2f}) "
+                            f"stagnation={self._stagnation_steps} "
+                            f"H={ent_val:.3f} "
+                            f"perturbed_layers={len(perturbed_layers)}"
+                        )
                     else:
                         with torch.no_grad():
                             for p in self.model.parameters():
                                 p.add_(torch.randn_like(p) * noise)
-                        tqdm.write(f"[Restart {self._restart_count}/{max_r}] "
-                                   f"全参数扰动(σ={noise})")
+                        tqdm.write(
+                            f"[Restart {self._restart_count}/{max_r} @ step {step}] "
+                            f"mode=full_param "
+                            f"noise={noise:.4f}(base={base_noise:.3f}, ratio={stagnation_ratio:.2f}) "
+                            f"stagnation={self._stagnation_steps} "
+                            f"H={ent_val:.3f} | no best snapshot"
+                        )
                     self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
                 else:
                     # 训练时间不敏感：超过重启上限后不再 Early Stop 终止，
                     # 改为「全参数强扰动 + 重置流计数」继续探索，直到跑满 TRAIN_STEPS。
                     # 从 best_snapshot 恢复（若有）以保住已发现的最优结构，再加大扰动。
                     low_entropy_streak = 0
-                    hard_noise = ModelConfig.RESTART_NOISE * 2.0
+                    hard_noise = min(ModelConfig.NOISE_MAX, noise * 2.0)
                     if self._best_snapshot is not None:
                         self.model.load_state_dict(self._best_snapshot)
                     with torch.no_grad():
                         for p in self.model.parameters():
                             p.add_(torch.randn_like(p) * hard_noise)
                     self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
-                    tqdm.write(f"[Hard Restart] 已重启{max_r}次仍坍塌，"
-                               f"H={ent_val:.3f}，强扰动(σ={hard_noise})继续，不终止。")
+                    tqdm.write(
+                        f"[Hard Restart @ step {step}] max_reached={max_r} "
+                        f"H={ent_val:.3f} hard_noise={hard_noise:.4f} "
+                        f"continue training without early stop"
+                    )
 
         # ── End of training ──────────────────────────────────────────
-        if self.best_formula is not None:
-            from .vocab import VOCAB_VERSION
-            strategy_data = {
-                "vocab_version": VOCAB_VERSION,
-                "symbol": self.target_symbol,
-                "formula": self.best_formula,
-                "best_score": self.best_score,
-            }
-            save_path = _strategy_file_for_symbol(self.target_symbol)
-            pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(save_path, "w") as fp:
-                json.dump(strategy_data, fp, indent=2)
+        # 仅当跑满最终步时才保存最终 strategy 和历史
+        if end_step == ModelConfig.TRAIN_STEPS:
+            if self.best_formula is not None:
+                from .vocab import VOCAB_VERSION
+                strategy_data = {
+                    "vocab_version": VOCAB_VERSION,
+                    "symbol": self.target_symbol,
+                    "formula": self.best_formula,
+                    "best_score": self.best_score,
+                }
+                save_path = _strategy_file_for_symbol(self.target_symbol)
+                pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(save_path, "w") as fp:
+                    json.dump(strategy_data, fp, indent=2)
 
-        sym_tag = f"[{self.target_symbol}] " if self.target_symbol else ""
-        self.training_history.pop('_low_entropy_streak', None)
-        hist_path = (
-            f"training_history_{self.target_symbol}.json"
-            if self.target_symbol else "training_history.json"
-        )
-        with open(hist_path, "w") as fp:
-            json.dump(self.training_history, fp)
+            sym_tag = f"[{self.target_symbol}] " if self.target_symbol else ""
+            self.training_history.pop('_low_entropy_streak', None)
+            hist_path = (
+                f"training_history_{self.target_symbol}.json"
+                if self.target_symbol else "training_history.json"
+            )
+            with open(hist_path, "w") as fp:
+                json.dump(self.training_history, fp)
 
-        print(f"\n✓ {sym_tag}Training completed!")
-        print(f"  Best val score : {self.best_score:.4f}")
-        print(f"  Best formula   : {self.best_formula}")
-        print(f"  Readable       : {self._decode_formula(self.best_formula)}")
-        print(f"  Elite pool     : {len(self._elite_pool)}")
-        print(f"  Restarts       : {self._restart_count}")
-        print(f"  Strategy saved : {save_path}")
+            print(f"\n✓ {sym_tag}Training completed!")
+            print(f"  Best val score : {self.best_score:.4f}")
+            print(f"  Best formula   : {self.best_formula}")
+            print(f"  Readable       : {self._decode_formula(self.best_formula)}")
+            print(f"  Elite pool     : {len(self._elite_pool)}")
+            print(f"  Elite decay    : enabled={ModelConfig.ELITE_DECAY}, half_life={ModelConfig.ELITE_DECAY_HALF_LIFE}")
+            print(f"  Adaptive noise : enabled={ModelConfig.ADAPTIVE_NOISE}, range=[{ModelConfig.NOISE_MIN}, {ModelConfig.NOISE_MAX}]")
+            print(f"  Partial reset  : enabled={ModelConfig.PARTIAL_RESET}, layers={ModelConfig.PARTIAL_RESET_LAYERS}")
+            print(f"  Restarts       : {self._restart_count}")
+            print(f"  Strategy saved : {save_path}")
 
 
     # ── 实时保存最优公式（防进程意外退出丢失）────────────────────────────────
