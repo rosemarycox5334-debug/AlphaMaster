@@ -90,7 +90,8 @@ def _repetition_penalty(formula: list[int]) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ConstrainedSampler:
-    def __init__(self, vocab_size: int, feat_offset: int, arity_map: dict[int, int]):
+    def __init__(self, vocab_size: int, feat_offset: int, arity_map: dict[int, int],
+                 positive_only_ids: set[int] | None = None):
         self.vocab_size  = vocab_size
         self.feat_offset = feat_offset
         self.arity_map   = arity_map
@@ -101,9 +102,24 @@ class ConstrainedSampler:
             else:
                 a = arity_map.get(tid, 1)
                 self.delta[tid] = 1 - a
+        # 恒正算子 token id 集合（用于算子链约束）
+        self.positive_only_ids = positive_only_ids or set()
+        # 构建感染传播/恢复算子 id 集合
+        from .vm import INFECTED_PROPAGATING_OPS, SIGN_RESTORE_OPS
+        from .ops import OPS_CONFIG as _ops
+        self.infected_propagating_ids = set()
+        self.sign_restore_ids = set()
+        for i, cfg in enumerate(_ops):
+            tid = i + feat_offset
+            if cfg[0] in INFECTED_PROPAGATING_OPS:
+                self.infected_propagating_ids.add(tid)
+            if cfg[0] in SIGN_RESTORE_OPS:
+                self.sign_restore_ids.add(tid)
 
     def valid_mask(self, stack_depth: int, step_idx: int,
-                   total_steps: int, device: torch.device) -> torch.Tensor:
+                   total_steps: int, device: torch.device,
+                   prev_token: int | None = None,
+                   infected_chain_len: int = 0) -> torch.Tensor:
         remaining = total_steps - step_idx
         mask = torch.ones(self.vocab_size, dtype=torch.bool, device=device)
         for tid in range(self.vocab_size):
@@ -115,6 +131,16 @@ class ConstrainedSampler:
             max_future = new_depth + (remaining - 1) * 1
             if 1 < min_future or 1 > max_future:
                 mask[tid] = False
+            # ── 算子链约束（感染模型）──────────────────────────────
+            # 如果已感染且感染链 >= 2，禁止再使用传播算子
+            # （允许恢复算子和非传播算子如 ADD/SUB/MUL）
+            if infected_chain_len >= 2 and tid in self.infected_propagating_ids:
+                mask[tid] = False
+            # 如果已感染且感染链 >= 3，禁止所有算子（强制恢复或结束）
+            # 实际上不禁止恢复算子，只禁止传播和恒正算子
+            if infected_chain_len >= 3:
+                if tid in self.infected_propagating_ids or tid in self.positive_only_ids:
+                    mask[tid] = False
         if not mask.any():
             for tid in range(self.vocab_size):
                 if stack_depth + self.delta[tid] >= 1:
@@ -122,13 +148,30 @@ class ConstrainedSampler:
         return mask
 
     def apply_mask_to_logits(self, logits: torch.Tensor, stack_depths: list[int],
-                              step_idx: int, total_steps: int) -> torch.Tensor:
+                              step_idx: int, total_steps: int,
+                              prev_tokens: list[int | None] | None = None,
+                              infected_chain_lens: list[int] | None = None) -> torch.Tensor:
         masked = logits.clone()
         device = logits.device
         for b, depth in enumerate(stack_depths):
-            vmask = self.valid_mask(depth, step_idx, total_steps, device)
+            prev_t = prev_tokens[b] if prev_tokens else None
+            icl = infected_chain_lens[b] if infected_chain_lens else 0
+            vmask = self.valid_mask(depth, step_idx, total_steps, device,
+                                    prev_token=prev_t, infected_chain_len=icl)
             masked[b][~vmask] = -1e9
         return masked
+
+    def update_infection(self, token: int, infected_chain_len: int) -> int:
+        """更新感染链长度，返回新的感染链长度。"""
+        if token in self.positive_only_ids:
+            return infected_chain_len + 1
+        elif token in self.sign_restore_ids:
+            return 0
+        elif token in self.infected_propagating_ids:
+            if infected_chain_len > 0:
+                return infected_chain_len + 1
+            return 0
+        return infected_chain_len  # 非传播/非恢复算子，不改变状态
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,7 +208,9 @@ class AlphaEngine:
 
         from .vocab import FORMULA_VOCAB as _v
         self.sampler = ConstrainedSampler(
-            vocab_size=_v.size, feat_offset=_v.operator_offset, arity_map=self.vm.arity_map
+            vocab_size=_v.size, feat_offset=_v.operator_offset,
+            arity_map=self.vm.arity_map,
+            positive_only_ids=self.vm.positive_only_ids
         )
 
         self.best_score   = -float('inf')
@@ -365,7 +410,7 @@ class AlphaEngine:
             end_step = ModelConfig.TRAIN_STEPS
 
         if verbose_header:
-            print("🚀 Starting MT5 Alpha Mining" +
+            print("Starting MT5 Alpha Mining" +
                   (" with LoRD Regularization..." if self.use_lord else "..."))
             print(f"   Entropy: thresh={ModelConfig.ENTROPY_COLLAPSE_THRESH}  "
                   f"coeff_max={ModelConfig.ENTROPY_COEFF_MAX}  "
@@ -422,11 +467,15 @@ class AlphaEngine:
                                   device=ModelConfig.DEVICE)
             lp_new, tok_new, ent_new = [], [], []
             sd_new = [0] * n_new
+            prev_tokens_new: list[int | None] = [None] * n_new
+            infected_chain_new: list[int] = [0] * n_new
 
             for si in range(ModelConfig.MAX_FORMULA_LEN):
                 lg, _, _ = self.model(inp_new)
                 lg = self.sampler.apply_mask_to_logits(lg, sd_new, si,
-                                                       ModelConfig.MAX_FORMULA_LEN)
+                                                       ModelConfig.MAX_FORMULA_LEN,
+                                                       prev_tokens=prev_tokens_new,
+                                                       infected_chain_lens=infected_chain_new)
                 d  = Categorical(logits=lg)
                 a  = d.sample()
                 lp_new.append(d.log_prob(a))
@@ -435,6 +484,9 @@ class AlphaEngine:
                 inp_new = torch.cat([inp_new, a.unsqueeze(1)], dim=1)
                 for b in range(n_new):
                     sd_new[b] += self.sampler.delta[a[b].item()]
+                    prev_tokens_new[b] = a[b].item()
+                    infected_chain_new[b] = self.sampler.update_infection(
+                        a[b].item(), infected_chain_new[b])
 
             seqs_new = torch.stack(tok_new, dim=1)
 
@@ -490,12 +542,16 @@ class AlphaEngine:
                 inp_e  = torch.zeros((ne, 1), dtype=torch.long,
                                      device=ModelConfig.DEVICE)
                 sd_e   = [0] * ne
+                prev_tokens_elite: list[int | None] = [None] * ne
+                infected_chain_elite: list[int] = [0] * ne
                 tok_e_t = torch.tensor(elite_formulas, dtype=torch.long,
                                        device=ModelConfig.DEVICE)
                 for si in range(ModelConfig.MAX_FORMULA_LEN):
                     lg_e, _, _ = self.model(inp_e)
                     lg_e = self.sampler.apply_mask_to_logits(
-                        lg_e, sd_e, si, ModelConfig.MAX_FORMULA_LEN
+                        lg_e, sd_e, si, ModelConfig.MAX_FORMULA_LEN,
+                        prev_tokens=prev_tokens_elite,
+                        infected_chain_lens=infected_chain_elite
                     )
                     d_e  = Categorical(logits=lg_e)
                     tk   = tok_e_t[:, si]
@@ -504,6 +560,9 @@ class AlphaEngine:
                     inp_e = torch.cat([inp_e, tk.unsqueeze(1)], dim=1)
                     for b in range(ne):
                         sd_e[b] += self.sampler.delta[tk[b].item()]
+                        prev_tokens_elite[b] = tk[b].item()
+                        infected_chain_elite[b] = self.sampler.update_infection(
+                        tk[b].item(), infected_chain_elite[b])
 
 
             # ── Part C: Evaluate all formulas ────────────────────────
@@ -832,7 +891,7 @@ class AlphaEngine:
             with open(hist_path, "w") as fp:
                 json.dump(self.training_history, fp)
 
-            print(f"\n✓ {sym_tag}Training completed!")
+            print(f"\n[DONE] {sym_tag}Training completed!")
             print(f"  Best val score : {self.best_score:.4f}")
             print(f"  Best formula   : {self.best_formula}")
             print(f"  Readable       : {self._decode_formula(self.best_formula)}")

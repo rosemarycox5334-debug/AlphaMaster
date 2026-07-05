@@ -112,3 +112,13 @@ class ModelConfig:
 
     # ── Walk-Forward Gap ───────────────────────────────────────────────
     WF_GAP: int = 20
+
+    # ── 公式结构约束（2026-07-05 新增）──────────────────────────────────
+    # 背景：index 组因子因 TS_RANK 连续使用退化为 beta 因子（91.8% 做多），
+    # 前半段市场跌亏钱、后半段市场涨赚钱，不是 alpha 而是 beta。
+    # 对策：在采样阶段禁止恒正算子链，在评分阶段添加 beta 中性 + 前后一致性奖惩。
+    ENABLE_FORMULA_STRUCTURE_CONSTRAINT: bool = True   # 总开关
+    BETA_NEUTRAL_PENALTY:     bool  = True             # 多空比例失衡惩罚
+    HALF_CONSISTENCY_BONUS:   bool  = True             # 前后一致性奖惩
+    BETA_NEUTRAL_THRESH:      float = 0.85             # 超过此比例同方向触发重罚
+    BETA_NEUTRAL_LIGHT_THRESH: float = 0.70            # 轻度失衡阈值

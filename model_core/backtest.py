@@ -234,6 +234,49 @@ class MT5Backtest:
 
         return float(freq_score + hold_bonus)
 
+    def _beta_neutral_penalty(self, position: Tensor) -> float:
+        """Beta 中性惩罚：多空比例严重失衡时扣分。
+
+        因子输出 >85% 同方向时，说明不是 alpha 因子而是 beta 因子
+        （如 index 组的 TS_RANK 连续使用导致恒正输出）。
+
+        Returns:
+            float，惩罚值（负数或零）
+        """
+        flat = position.reshape(-1)
+        long_ratio = (flat > 0.05).float().mean().item()
+        short_ratio = (flat < -0.05).float().mean().item()
+        max_ratio = max(long_ratio, short_ratio)
+        if max_ratio > 0.85:
+            # 超过 85% 同方向，重罚
+            excess = (max_ratio - 0.85) / 0.15  # 0~1
+            return -2.0 * excess  # 最多 -2.0
+        elif max_ratio > 0.70:
+            # 70-85% 轻度失衡，轻罚
+            excess = (max_ratio - 0.70) / 0.15  # 0~1
+            return -0.5 * excess  # 最多 -0.5
+        return 0.0
+
+    def _half_consistency_bonus(self, pnl: Tensor) -> float:
+        """前后一致性奖励：前半段和后半段 Sortino 同号时加分。
+
+        防止因子只在某一段市场环境（如牛市）有效。
+
+        Returns:
+            float，奖励/惩罚值
+        """
+        T = pnl.shape[1]
+        if T < 20:
+            return 0.0
+        half = T // 2
+        s1 = self._sortino(pnl[:, :half]).item()
+        s2 = self._sortino(pnl[:, half:]).item()
+        if s1 > 0 and s2 > 0:
+            return 0.5  # 前后都赚钱，奖励
+        elif s1 * s2 < 0:
+            return -1.0  # 前后相反，重罚（如 index 组的 beta 因子）
+        return 0.0  # 一正一零或两零，不奖不罚
+
     def _exposure_penalty(self, position: Tensor) -> float:
         """在场时间惩罚（仅下限，无上限）：收益优先模式。
 
@@ -347,6 +390,8 @@ class MT5Backtest:
         exp_pen      = self._exposure_penalty(position)
 
         if N == 1:
+            beta_pen = self._beta_neutral_penalty(position)
+            consist = self._half_consistency_bonus(pnl)
             if ModelConfig.REWARD_MODE == "ftmo":
                 # FTMO 专属：年化收益 0.80，Calmar 0.10（控制 MDD 贴近 10% 上限）
                 return (
@@ -356,6 +401,8 @@ class MT5Backtest:
                     + 0.03 * ts_ic           # IC 预测方向（降权）
                     + 0.02 * tq              # 交易频率质量（降权）
                     + exp_pen                # 稀疏惩罚
+                    + beta_pen               # Beta 中性惩罚
+                    + consist                # 前后一致性奖惩
                 )
             return (
                 0.60 * ann_ret           # 主目标：年化绝对收益
@@ -364,6 +411,8 @@ class MT5Backtest:
                 + 0.10 * ts_ic           # IC 预测方向
                 + 0.05 * tq              # 交易频率质量
                 + exp_pen                # 稀疏惩罚
+                + beta_pen               # Beta 中性惩罚
+                + consist                # 前后一致性奖惩
             )
 
         per_sym_sortino     = []
@@ -381,6 +430,8 @@ class MT5Backtest:
             per_sym_sortino, per_sym_trade_count, eval_bars=eval_bars
         )
         cost_s   = self._cost_stress(position, target_ret)
+        beta_pen = self._beta_neutral_penalty(position)
+        consist  = self._half_consistency_bonus(pnl)
 
         if ModelConfig.REWARD_MODE == "ftmo":
             # FTMO 专属：年化收益 0.75（提权），Calmar 0.10（对齐 10% Max Loss）
@@ -393,6 +444,8 @@ class MT5Backtest:
                 + 0.02 * cost_s              # 成本压力测试（降权）
                 + 0.03 * tq                  # 交易频率质量（降权）
                 + exp_pen                    # 稀疏惩罚
+                + beta_pen                   # Beta 中性惩罚
+                + consist                    # 前后一致性奖惩
             )
 
         return (
@@ -404,6 +457,8 @@ class MT5Backtest:
             + 0.05 * cost_s              # 成本压力测试
             + 0.05 * tq                  # 交易频率质量
             + exp_pen                    # 稀疏惩罚
+            + beta_pen                   # Beta 中性惩罚
+            + consist                    # 前后一致性奖惩
         )
 
     # ──────────────────────────────────────────────────────────────────────
