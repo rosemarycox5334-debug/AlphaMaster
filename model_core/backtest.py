@@ -360,6 +360,45 @@ class MT5Backtest:
 
         return train_score, val_score
 
+    def _reversal_bonus(self, factors: Tensor) -> Tensor:
+        """反转奖励：鼓励因子有低/负自相关（均值回归特征）。
+
+        计算每个品种的 lag-1 自相关系数，越接近 0 或负值 = 越好。
+        高度正自相关（>0.5）= 趋势跟踪，减分。
+
+        单品种模式：直接返回标量。
+        """
+        N = factors.shape[0]
+        scores = []
+        for n in range(N):
+            x = factors[n, :-1]     # t=0..T-2
+            y = factors[n, 1:]      # t=1..T-1
+            xm = x - x.mean(); ym = y - y.mean()
+            sx = (xm**2).mean().sqrt(); sy = (ym**2).mean().sqrt()
+            ac1 = (xm*ym).mean() / (sx*sy + 1e-8) if sx > 1e-6 and sy > 1e-6 else torch.tensor(0.0)
+            # 奖励低自相关：bonus = 1 - |ac1|, 负自相关额外加分
+            bonus = 1.0 - torch.abs(ac1)
+            if ac1 < 0:
+                bonus = bonus + 0.5  # 负自相关（真正反转）额外加分
+            bonus = torch.clamp(bonus, -1.0, 2.0)
+            scores.append(bonus)
+        return torch.stack(scores).mean()
+
+    def _symmetry_check(self, position: Tensor) -> Tensor:
+        """多空对称性检查：奖励 50/50 多空分布。
+
+        均值回归策略应该在多空之间大致平衡，
+        过度偏向某一侧 = 趋势跟踪特征，应惩罚。
+        """
+        long_ratio  = (position > 0).float().mean()
+        short_ratio = (position < 0).float().mean()
+        # 理想值：long_ratio ≈ 0.5, short_ratio ≈ 0.5
+        # 偏差：|long_ratio - 0.5| + |short_ratio - 0.5|
+        deviation = torch.abs(long_ratio - 0.5) + torch.abs(short_ratio - 0.5)
+        # 偏差 0 → 奖励 1.0; 偏差 1.0 → 奖励 -1.0
+        bonus = 1.0 - 2.0 * deviation
+        return torch.clamp(bonus, -1.0, 1.0)
+
     def _multi_objective(
         self,
         factors:    Tensor,
@@ -375,6 +414,8 @@ class MT5Backtest:
         clamp 上限放开（Sortino 40→20 保持，收益无上限）。
 
         N=1 单品种模式权重略有不同（无 symbol_consistency/cost_stress）。
+
+        2026-07-08: 新增 forex 模式 — 偏向均值回归策略。
         """
         N = pnl.shape[0]
 
@@ -392,6 +433,28 @@ class MT5Backtest:
         if N == 1:
             beta_pen = self._beta_neutral_penalty(position)
             consist = self._half_consistency_bonus(pnl)
+
+            if ModelConfig.REWARD_MODE == "forex":
+                # Forex 均值回归模式：
+                #   - 降年化收益权重 (0.80→0.25)：外汇趋势弱，避免奖励虚假趋势
+                #   - 提 IC 权重 (0.03→0.25)：信号质量是核心
+                #   - 新增反转奖励 (0.20)：奖励低/负因子自相关
+                #   - 新增对称检查 (0.15)：奖励 50/50 多空平衡
+                rev_bonus = self._reversal_bonus(factors)
+                sym_bonus = self._symmetry_check(position)
+                return (
+                    0.25 * ann_ret           # 年化收益（降权，外汇趋势噪声大）
+                    + 0.05 * port_sortino    # 风险调整辅助
+                    + 0.05 * port_calmar     # 回撤控制
+                    + 0.25 * ts_ic           # 信号质量（大幅提权）
+                    + 0.20 * rev_bonus       # 反转奖励（核心：反趋势）
+                    + 0.15 * sym_bonus       # 多空对称（均值回归特征）
+                    + 0.05 * tq              # 交易频率质量
+                    + exp_pen                # 稀疏惩罚
+                    + beta_pen               # Beta 中性惩罚
+                    + consist                # 前后一致性奖惩
+                )
+
             if ModelConfig.REWARD_MODE == "ftmo":
                 # FTMO 专属：年化收益 0.80，Calmar 0.10（控制 MDD 贴近 10% 上限）
                 return (

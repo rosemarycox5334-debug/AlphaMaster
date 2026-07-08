@@ -1,9 +1,15 @@
 {
   "vocab_version": "v9217a2c0d91a",
   "symbol": "XAUUSD",
-  "name": "precious_metals_v1",
-  "formula": [48, 42, 94, 42, 25, 103, 86, 126],
-  "formula_readable": "DMI_ADX_14 -> KYLE_LAMBDA -> EMA_20 -> KYLE_LAMBDA -> MFI14 -> SCALE -> TS_CORR_10 -> IF_GT",
-  "best_score": 0.5852161645889282,
-  "note": "XAUUSD solo backtest ann=+26.1% Sharpe=2.44 (8y H1, 2026-07-08)"
+  "formula": [
+    43,
+    79,
+    52,
+    49,
+    51,
+    112,
+    126,
+    115
+  ],
+  "best_score": 1.4602351188659668
 }

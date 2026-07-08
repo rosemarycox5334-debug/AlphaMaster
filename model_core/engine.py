@@ -641,32 +641,41 @@ class AlphaEngine:
                     step_max_val = final_val;  step_best_f = fml
 
                 if final_val > self.best_score:
-                    # P3：冠军选择稳健性校验——连续仓位均值 < 5% 的极稀疏公式拒绝登顶
-                    pos_check = compute_target_positions_stateless(res)
-                    exposure = pos_check.abs().mean().item()  # 连续仓位：均值
-                    if exposure < 0.05:
-                        # 极稀疏：参与梯度更新但不登顶，但记录日志方便排查
+                    # OOS 泛化门控：val_score / train_score < 0.5 说明过拟合
+                    train_val = rewards[i].item()
+                    if train_val > 0.5 and final_val < train_val * 0.5:
                         tqdm.write(
-                            f"[SparseSkip @ step {step}] Val={final_val:.3f} "
-                            f"IC={ic_i:.4f} Exp={exposure:.1%} | too sparse to be king"
+                            f"[OverfitSkip @ step {step}] Val={final_val:.3f} "
+                            f"Train={train_val:.3f} ratio={final_val/train_val:.2f} | OOS too low vs in-sample"
                         )
                         pass
                     else:
-                        old_best = self.best_score
-                        self.best_score   = final_val
-                        self.best_formula = fml
-                        self._best_snapshot = copy.deepcopy(self.model.state_dict())
-                        self._best_update_step = step
-                        self._stagnation_steps = 0
-                        self._update_factor_pool(final_val, res)
-                        # 即时保存：任何时刻进程退出都有最新最优公式（防终端回收丢策略）
-                        self._save_strategy_live()
-                        tqdm.write(
-                            f"[!] New King @ step {step}: Val={final_val:.3f} "
-                            f"(was {old_best:.3f}, +{final_val-old_best:.3f}) "
-                            f"IC={ic_i:.4f} Exp={exposure:.1%} | "
-                            f"{fml}\n    {self._decode_formula(fml)}"
-                        )
+                        # P3：冠军选择稳健性校验——连续仓位均值 < 5% 的极稀疏公式拒绝登顶
+                        pos_check = compute_target_positions_stateless(res)
+                        exposure = pos_check.abs().mean().item()  # 连续仓位：均值
+                        if exposure < 0.05:
+                            # 极稀疏：参与梯度更新但不登顶，但记录日志方便排查
+                            tqdm.write(
+                                f"[SparseSkip @ step {step}] Val={final_val:.3f} "
+                                f"IC={ic_i:.4f} Exp={exposure:.1%} | too sparse to be king"
+                            )
+                            pass
+                        else:
+                            old_best = self.best_score
+                            self.best_score   = final_val
+                            self.best_formula = fml
+                            self._best_snapshot = copy.deepcopy(self.model.state_dict())
+                            self._best_update_step = step
+                            self._stagnation_steps = 0
+                            self._update_factor_pool(final_val, res)
+                            # 即时保存：任何时刻进程退出都有最新最优公式（防终端回收丢策略）
+                            self._save_strategy_live()
+                            tqdm.write(
+                                f"[!] New King @ step {step}: Val={final_val:.3f} "
+                                f"(was {old_best:.3f}, +{final_val-old_best:.3f}) "
+                                f"IC={ic_i:.4f} Exp={exposure:.1%} | "
+                                f"{fml}\n    {self._decode_formula(fml)}"
+                            )
                 self._update_elite_pool(final_val, fml, step)
 
 

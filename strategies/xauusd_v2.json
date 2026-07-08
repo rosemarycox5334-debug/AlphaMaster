@@ -1,0 +1,102 @@
+{
+  "name": "xauusd_v2",
+  "version": "2026-07-08",
+  "vocab_version": "v9217a2c0d91a",
+  "status": "verified",
+  "symbol": "XAUUSD (Gold spot)",
+  "mode": "single",
+  "formula_tokens": [
+    43,
+    77,
+    25,
+    93,
+    47,
+    88,
+    115,
+    65
+  ],
+  "formula_readable": "CMF_20 -> TS_MEAN_5 -> MFI14 -> EMA_5 -> AROON_OSC_25 -> MOMENTUM_10 -> MIN -> ADD",
+  "formula_operators": [
+    "CMF_20",
+    "TS_MEAN_5",
+    "MFI14",
+    "EMA_5",
+    "AROON_OSC_25",
+    "MOMENTUM_10",
+    "MIN",
+    "ADD"
+  ],
+  "train_best_score": 1.4264929294586182,
+  "train_step": 240,
+  "train_restarts": 1,
+  "backtest": {
+    "annual_return": "+45.5%",
+    "sharpe": 4.48,
+    "ic": "+0.066",
+    "max_drawdown": "-6%",
+    "win_rate": "57.2%",
+    "turnover": "222 trades/year",
+    "position_bias": "51% long / 45% short",
+    "data": "8.0 years, 50,000 H1 bars",
+    "note": "策略库最强！前三年(2020-2022)爆发，Year4-6平淡，Year7-8恢复。vs旧版(双品种训练)：Sharpe 4.48 vs 2.66，IC 0.066 vs 0.005",
+    "walk_forward": {
+      "fold1": {
+        "oos": "+1.96",
+        "sharpe": 8.64
+      },
+      "fold2": {
+        "oos": "-0.13",
+        "sharpe": -0.93
+      },
+      "fold3": {
+        "oos": "+0.05",
+        "sharpe": 0.36
+      },
+      "fold4": {
+        "oos": "+0.37",
+        "sharpe": 1.71
+      },
+      "total_oos": "+2.25",
+      "verdict": "PASS (3/4 folds)"
+    },
+    "yearly": {
+      "year1": {
+        "pnl": "+0.76",
+        "sharpe": 12.15
+      },
+      "year2": {
+        "pnl": "+1.09",
+        "sharpe": 11.5
+      },
+      "year3": {
+        "pnl": "+1.47",
+        "sharpe": 11.18
+      },
+      "year4": {
+        "pnl": "+0.05",
+        "sharpe": 0.6
+      },
+      "year5": {
+        "pnl": "-0.11",
+        "sharpe": -1.33
+      },
+      "year6": {
+        "pnl": "-0.02",
+        "sharpe": -0.24
+      },
+      "year7": {
+        "pnl": "+0.11",
+        "sharpe": 1.21
+      },
+      "year8": {
+        "pnl": "+0.32",
+        "sharpe": 2.44
+      }
+    }
+  },
+  "logic": {
+    "summary": "资金流量+阿隆震荡+动量混合",
+    "detail": "CMF_20(Chaikin资金流)经TS_MEAN_5平滑后与MFI14(资金流量)交汇，EMA_5短期降噪，AROON_OSC_25判断趋势强度，MOMENTUM_10确认方向，MIN限制极值，ADD合成最终信号",
+    "comparison": "vs xauusd_v1(双品种训练)：从金银组合中提取的v1被白银Kyle_Lambda干扰，v2单品种训练完全专注黄金自身特征，Sharpe从2.66提升至4.48(↑68%)，IC从0.005提升至0.066(↑13倍)"
+  }
+}

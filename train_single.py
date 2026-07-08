@@ -108,9 +108,14 @@ def _save_strategy(engine, symbol):
 if __name__ == "__main__":
     offline = "--offline" in sys.argv
     syms = [s for s in sys.argv[1:] if not s.startswith("--")]
+    mode  = "ftmo"
+    if "--mode" in sys.argv:
+        idx = sys.argv.index("--mode")
+        mode = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "ftmo"
+    ModelConfig.REWARD_MODE = mode
 
     if not syms:
-        print("用法: python train_single.py <SYMBOL> [--offline]")
+        print("用法: python train_single.py <SYMBOL> [--offline] [--mode ftmo|forex|standard]")
         print(f"可选品种: {Config.TRAINABLE_SYMBOLS}")
         sys.exit(1)
 
