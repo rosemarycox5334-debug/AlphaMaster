@@ -37,7 +37,7 @@ class ModelConfig:
     #   2. 放大采样预算：BATCH_SIZE 128→256，TRAIN_STEPS 3000→8000
     #   3. 更大精英池（60）保留更多历史最优
     BATCH_SIZE      = 192   # 每步采样公式数（原 128，1.5x 提升覆盖率）
-    TRAIN_STEPS     = 5000  # 每组训练步数（原 3000）
+    TRAIN_STEPS     = 9000  # 每组训练步数（55次重启需要更多步数）
     MAX_FORMULA_LEN = 8     # 公式长度上限：保持 8（10 会导致 CPU 训练慢 3 倍）
 
     # ── 特征维度（由 vocab.py 自动派生，无需手动修改）──────────────────
@@ -86,9 +86,10 @@ class ModelConfig:
     ELITE_REWARD_SCALE: float = 1.2
 
     # ── 坍塌重启（大空间加强版）─────────────────────────────────────────
-    # MAX_RESTARTS 8→25、RESTART_NOISE 0.05→0.1：时间不敏感，多给机会+更强扰动。
+    # MAX_RESTARTS 8→25→55、RESTART_NOISE 0.05→0.1→0.25：时间不敏感，多给机会+更强扰动。
     # 配合 engine.py：超过 MAX_RESTARTS 后不再 Early Stop，改为强扰动继续训练。
-    MAX_RESTARTS:   int   = 25
+    # 2026-07-09: US100 训练 24/25 重启仍有突破，扩到 55 次。
+    MAX_RESTARTS:   int   = 55
     RESTART_NOISE:  float = 0.25
 
     # ── 自适应噪声：Best 停滞时自动增大扰动 ─────────────────────────────

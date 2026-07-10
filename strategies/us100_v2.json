@@ -1,0 +1,90 @@
+{
+  "name": "us100_v2",
+  "version": "2026-07-09",
+  "vocab_version": "v9217a2c0d91a",
+  "status": "verified",
+  "symbol": "US100.cash (Nasdaq-100)",
+  "mode": "single + OOS_gate + extended(55 restarts)",
+  "formula_tokens": [
+    57,
+    89,
+    75,
+    89,
+    39,
+    116,
+    117,
+    123
+  ],
+  "formula_readable": "ROLL_SKEW_20 -> TS_MAX_10 -> DELAY1 -> TS_MAX_10 -> YANG_ZHANG_VOL -> MAX -> POWER -> CLIP",
+  "formula_operators": [
+    "ROLL_SKEW_20",
+    "TS_MAX_10",
+    "DELAY1",
+    "TS_MAX_10",
+    "YANG_ZHANG_VOL",
+    "MAX",
+    "POWER",
+    "CLIP"
+  ],
+  "train_best_score": 1.377672553062439,
+  "train_step": 3740,
+  "train_restarts": 23,
+  "train_total_duration": "~9h (5000+9000 steps, 30 restarts)",
+  "backtest": {
+    "annual_return": "+34.5%",
+    "sharpe": 1.86,
+    "ic": "+0.020",
+    "win_rate": "53.1%",
+    "turnover": "188 trades/year",
+    "position_bias": "59% long / 40% short",
+    "data": "5.3 years, 32,973 H1 bars",
+    "note": "OOS门控+扩展重启版。vs v1：Sharpe从2.18降到1.86但5/5年全盈+4/4 WF。vs step2320(早期)：Sharpe 1.27→1.86(+46%)。核心突破在于把DELAY1从第一位换到TS_MAX_10之后",
+    "walk_forward": {
+      "fold1": {
+        "oos": "+0.50",
+        "sharpe": 2.13
+      },
+      "fold2": {
+        "oos": "+0.15",
+        "sharpe": 1.09
+      },
+      "fold3": {
+        "oos": "+0.37",
+        "sharpe": 1.86
+      },
+      "fold4": {
+        "oos": "+0.23",
+        "sharpe": 1.69
+      },
+      "total_oos": "+1.25",
+      "verdict": "PASS — ALL 4 folds profitable (4/4)"
+    },
+    "yearly": {
+      "year1": {
+        "pnl": "+0.37",
+        "sharpe": 1.4
+      },
+      "year2": {
+        "pnl": "+0.34",
+        "sharpe": 1.56
+      },
+      "year3": {
+        "pnl": "+0.08",
+        "sharpe": 0.61
+      },
+      "year4": {
+        "pnl": "+0.38",
+        "sharpe": 2.79
+      },
+      "year5": {
+        "pnl": "+0.21",
+        "sharpe": 1.08
+      }
+    }
+  },
+  "logic": {
+    "summary": "偏斜脉冲+Yang-Zhang波动+双层峰值筛选",
+    "detail": "ROLL_SKEW_20找价格分布偏斜→TS_MAX_10先取峰值→DELAY1延迟确认→二次TS_MAX_10强化→YANG_ZHANG_VOL(含隔夜跳空)波动归一→MAX取大→POWER放大→CLIP截断",
+    "key_insight": "TS_MAX_10放在DELAY1之前是关键：先捞到最强信号再等确认，比先等再找更有效。YANG_ZHANG_VOL比ATR更适合纳指因其能捕捉盘后跳空"
+  }
+}
