@@ -46,6 +46,7 @@ ENV/
 
 # Testing
 .pytest_cache/
+.hypothesis/
 .coverage
 htmlcov/
 .tox/
@@ -74,9 +75,10 @@ strategies/*_progress.txt
 strategies/best_forex_smoke.json
 strategies/best_group_forex_smoke.json
 
-# ── 回测输出（图表与报告）──────────────────────────────────────────
+# ── 回测/验证输出（图表、报告、可再生产物）────────────────────────
 backtest_output/
 backtest_output_*/
+verification_results.json
 
 # ── 实盘/运行态文件 ────────────────────────────────────────────────
 portfolio_state.json
@@ -87,9 +89,12 @@ train_stderr.log
 *.log
 logs/
 
-# ── 本地数据缓存 ───────────────────────────────────────────────────
+# ── 本地数据缓存（体积大，机器相关）──────────────────────────────
+data/
+!data_pipeline/
 data/cache/
 **/kline_cache/
+*.parquet
 *.hcc
 *.hc
 
