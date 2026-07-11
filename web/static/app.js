@@ -1626,11 +1626,13 @@ let rtSources = [];
 let rtSourceById = {};
 let rtImportedStrategy = null; // {path, name}
 let rtGridSig = "";
+let rtServerSkew = 0; // server_time - local_now（秒）
+let rtCountdownTimer = null;
 
 const RT_DIR = {
   LONG: { label: "↑ 预期上涨", cls: "rt-long", color: "#4ade80" },
   SHORT: { label: "↓ 预期下跌", cls: "rt-short", color: "#f87171" },
-  FLAT: { label: "— 无信号", cls: "rt-flat", color: "#7a8a9e" },
+  FLAT: { label: "— 先观望", cls: "rt-flat", color: "#7a8a9e" },
 };
 const RT_STATE_LABEL = {
   pending: "等待首次计算",
@@ -1638,6 +1640,21 @@ const RT_STATE_LABEL = {
   insufficient: "历史不足",
   error: "错误",
 };
+
+/** 把 0~1 强度翻成「把握」白话 */
+function rtSizePlain(strength, direction) {
+  if (direction === "FLAT" || direction == null) {
+    return { size: "没把握" };
+  }
+  const s = Math.max(0, Math.min(1, Number(strength) || 0));
+  let size;
+  if (s < 0.2) size = "一点把握";
+  else if (s < 0.4) size = "把握不大";
+  else if (s < 0.6) size = "一半把握";
+  else if (s < 0.8) size = "比较有把握";
+  else size = "很有把握";
+  return { size };
+}
 
 function escHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
@@ -1648,6 +1665,59 @@ function escHtml(s) {
 function rtClock(ts) {
   if (!ts) return "—";
   return new Date(ts * 1000).toLocaleTimeString();
+}
+
+function rtNowSec() {
+  return Date.now() / 1000 + rtServerSkew;
+}
+
+function rtFmtCountdown(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  if (s < 60) return `${s}秒`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return `${m}分${String(rs).padStart(2, "0")}秒`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 48) return `${h}小时${rm}分`;
+  const d = Math.floor(h / 24);
+  return `${d}天${h % 24}小时`;
+}
+
+function ensureRtCountdownTimer() {
+  if (rtCountdownTimer) return;
+  rtCountdownTimer = setInterval(tickRtCountdowns, 1000);
+}
+
+function tickRtCountdowns() {
+  document.querySelectorAll(".rt-countdown").forEach((el) => {
+    if (el.dataset.session === "closed") {
+      el.textContent = "休市中";
+      return;
+    }
+    const nxt = Number(el.dataset.nextClose);
+    if (!Number.isFinite(nxt) || nxt <= 0) {
+      el.textContent = "距离下次判断 —";
+      return;
+    }
+    const left = nxt - rtNowSec();
+    el.textContent = left <= 0 ? "即将重新判断…" : `距离下次判断 ${rtFmtCountdown(left)}`;
+  });
+  const hintCd = $("rtNextHint");
+  if (hintCd) {
+    if (hintCd.dataset.session === "closed") {
+      hintCd.textContent = "休市中";
+      return;
+    }
+    if (hintCd.dataset.nextClose) {
+      const nxt = Number(hintCd.dataset.nextClose);
+      if (Number.isFinite(nxt) && nxt > 0) {
+        const left = nxt - rtNowSec();
+        hintCd.textContent =
+          left <= 0 ? "即将重新判断" : `距离下次判断 ${rtFmtCountdown(left)}`;
+      }
+    }
+  }
 }
 
 async function initRealtimeOnce() {
@@ -1672,6 +1742,101 @@ async function initRealtimeOnce() {
     await logClientError("加载数据源失败: " + e.message);
   }
   await loadRtStrategies();
+  await loadRtFeishuSettings();
+}
+
+async function loadRtFeishuSettings() {
+  try {
+    const data = await fetchJSON("/api/realtime/feishu");
+    const en = $("rtFeishuEnabled");
+    const wh = $("rtFeishuWebhook");
+    const sec = $("rtFeishuSecret");
+    if (en) en.checked = !!data.enabled;
+    if (wh) wh.value = data.webhook_url || "";
+    if (sec) sec.value = data.secret || "";
+  } catch (e) {
+    const hint = $("rtFeishuHint");
+    if (hint) {
+      hint.textContent = "加载飞书设置失败: " + e.message;
+      hint.classList.add("bad");
+    }
+  }
+}
+
+async function saveRtFeishuSettings() {
+  const hint = $("rtFeishuHint");
+  const btn = $("rtFeishuSaveBtn");
+  if (btn) btn.disabled = true;
+  try {
+    await fetchJSON("/api/realtime/feishu", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: !!$("rtFeishuEnabled")?.checked,
+        webhook_url: $("rtFeishuWebhook")?.value || "",
+        secret: $("rtFeishuSecret")?.value || "",
+      }),
+    });
+    if (hint) {
+      hint.textContent = "✓ 已保存，方向转折时会推送到飞书群。";
+      hint.classList.remove("bad", "invalid");
+      hint.classList.add("valid");
+    }
+    if (btn) {
+      const old = btn.textContent;
+      btn.textContent = "已保存";
+      setTimeout(() => {
+        if (btn.textContent === "已保存") btn.textContent = old || "保存";
+      }, 1600);
+    }
+  } catch (e) {
+    if (hint) {
+      hint.textContent = "保存失败: " + e.message;
+      hint.classList.remove("valid");
+      hint.classList.add("bad", "invalid");
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function testRtFeishu() {
+  const hint = $("rtFeishuHint");
+  const btn = $("rtFeishuTestBtn");
+  if (btn) btn.disabled = true;
+  try {
+    await fetchJSON("/api/realtime/feishu/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        webhook_url: $("rtFeishuWebhook")?.value || "",
+        secret: $("rtFeishuSecret")?.value || "",
+      }),
+    });
+    if (hint) {
+      hint.textContent = "✓ 测试消息已发送，请到飞书群查收。";
+      hint.classList.remove("bad", "invalid");
+      hint.classList.add("valid");
+    }
+  } catch (e) {
+    if (hint) {
+      hint.textContent = "测试失败: " + e.message;
+      hint.classList.remove("valid");
+      hint.classList.add("bad", "invalid");
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function openRtFeishuHelpModal() {
+  const modal = $("rtFeishuHelpModal");
+  if (modal) modal.hidden = false;
+}
+
+function closeRtFeishuHelpModal() {
+  const modal = $("rtFeishuHelpModal");
+  if (modal) modal.hidden = true;
 }
 
 async function loadRtStrategies() {
@@ -1684,12 +1849,17 @@ async function loadRtStrategies() {
   } catch (_) {}
   const opts = ['<option value="">— 选择已保存策略 —</option>'];
   if (rtImportedStrategy) {
-    opts.push(`<option value="${escHtml(rtImportedStrategy.path)}">导入: ${escHtml(rtImportedStrategy.name)}</option>`);
+    const isym = escHtml(rtImportedStrategy.symbol || "");
+    opts.push(
+      `<option value="${escHtml(rtImportedStrategy.path)}" data-symbol="${isym}">导入: ${escHtml(rtImportedStrategy.name)}</option>`
+    );
   }
   rows.forEach((r) => {
     const score = r.best_score != null ? Number(r.best_score).toFixed(3) : "—";
     const tf = r.timeframe ? ` ${r.timeframe}` : "";
-    opts.push(`<option value="${escHtml(r.strategy_file)}">${escHtml(r.symbol)}${tf} · 分数 ${score}</option>`);
+    opts.push(
+      `<option value="${escHtml(r.strategy_file)}" data-symbol="${escHtml(r.symbol || "")}">${escHtml(r.symbol)}${tf} · 分数 ${score}</option>`
+    );
   });
   const prev = sel.value;
   sel.innerHTML = opts.join("");
@@ -1719,6 +1889,22 @@ function onRtSourceChange() {
   }
 }
 
+function rtParseSymbolFromFilename(pathOrName) {
+  const name = String(pathOrName || "").split(/[/\\]/).pop() || "";
+  let m = name.match(/^best_(.+)\.json$/i);
+  if (m) return m[1];
+  m = name.match(/^strategy_(.+)_step\d+/i);
+  if (m) return m[1];
+  return "";
+}
+
+function rtApplySymbolFromStrategy(sym) {
+  const s = String(sym || "").trim();
+  if (!s) return;
+  const input = $("rtSymbolInput");
+  if (input) input.value = s;
+}
+
 function onRtStrategyChange() {
   const sel = $("rtStrategySelect");
   const picked = $("rtStrategyPicked");
@@ -1727,14 +1913,28 @@ function onRtStrategyChange() {
   picked.textContent = sel.value
     ? `因子来源：${opt ? opt.textContent : sel.value}。信号取最后已收盘 bar。`
     : "因子来源：从已保存策略下拉选择，或「导入策略」选本地 JSON。信号取最后已收盘 bar。";
+  if (!sel.value) return;
+  const fromOpt = (opt && opt.dataset.symbol) || "";
+  const fromImport =
+    rtImportedStrategy && sel.value === rtImportedStrategy.path
+      ? rtImportedStrategy.symbol || ""
+      : "";
+  const sym = fromOpt || fromImport || rtParseSymbolFromFilename(sel.value);
+  rtApplySymbolFromStrategy(sym);
 }
 
 async function rtBrowseStrategy() {
   try {
     const res = await fetchJSON("/api/strategy-file/browse", { method: "POST" });
     if (res.cancelled) return;
-    rtImportedStrategy = { path: res.strategy_file, name: res.filename || res.strategy_file };
+    const name = res.filename || res.strategy_file;
+    rtImportedStrategy = {
+      path: res.strategy_file,
+      name,
+      symbol: (res.symbol || "").trim() || rtParseSymbolFromFilename(name),
+    };
     await loadRtStrategies();
+    rtApplySymbolFromStrategy(rtImportedStrategy.symbol);
   } catch (e) {
     await logClientError("导入策略失败: " + e.message);
   }
@@ -1764,7 +1964,6 @@ async function rtAddWatch() {
     });
     if (picked) picked.classList.remove("bad");
     rtEngineRunning = true;
-    if ($("rtEngineToggle")) $("rtEngineToggle").checked = true;
     rtGridSig = "";
     await refreshRealtime();
   } catch (e) {
@@ -1788,16 +1987,6 @@ async function rtRemoveWatch(id) {
   }
 }
 
-async function rtToggleEngine(on) {
-  try {
-    await fetchJSON(`/api/realtime/${on ? "start" : "stop"}`, { method: "POST" });
-    rtEngineRunning = !!on;
-    await refreshRealtime();
-  } catch (e) {
-    await logClientError("引擎切换失败: " + e.message);
-  }
-}
-
 async function refreshRealtime() {
   let st;
   try {
@@ -1805,16 +1994,47 @@ async function refreshRealtime() {
   } catch (_) {
     return;
   }
+  // 有监控项却未在跑时自动拉起（不再提供手动开关）
+  if (st.count > 0 && !st.running) {
+    try {
+      st = await fetchJSON("/api/realtime/start", { method: "POST" });
+    } catch (_) {}
+  }
   rtEngineRunning = !!st.running;
-  const toggle = $("rtEngineToggle");
-  if (toggle) toggle.checked = rtEngineRunning;
+  if (typeof st.server_time === "number") {
+    rtServerSkew = st.server_time - Date.now() / 1000;
+  }
+
+  const nearest = st.nearest_seconds_to_next;
+  let nearestClose = null;
+  let anyLive = false;
+  let anyOk = false;
+  for (const w of st.watches || []) {
+    if (w.state === "ok") anyOk = true;
+    if (w.session_live && w.next_bar_close_at != null) {
+      anyLive = true;
+      if (nearestClose == null || w.next_bar_close_at < nearestClose) {
+        nearestClose = w.next_bar_close_at;
+      }
+    }
+  }
+
   const hint = $("rtStatusHint");
   if (hint) {
-    hint.textContent = st.count
-      ? `${rtEngineRunning ? "运行中" : "已暂停"} · ${st.count} 项 · ${new Date().toLocaleTimeString()}`
-      : (rtEngineRunning ? "运行中 · 无监控项" : "未启动");
+    const base = st.count
+      ? `${rtEngineRunning ? "运行中" : "已暂停"} · ${st.count} 项`
+      : "暂无监控项";
+    if (nearestClose) {
+      hint.innerHTML = `${base} · <span id="rtNextHint" data-next-close="${nearestClose}"></span>`;
+    } else if (anyOk && !anyLive) {
+      hint.innerHTML = `${base} · <span id="rtNextHint" data-session="closed">休市中</span>`;
+    } else {
+      hint.textContent = base;
+    }
   }
   renderRealtimeGrid(st.watches || []);
+  ensureRtCountdownTimer();
+  tickRtCountdowns();
 }
 
 // 半环表盘（180° 上半环，值弧按强度填充）
@@ -1841,9 +2061,39 @@ function renderRealtimeGrid(watches) {
 
   // 签名：只在信号相关字段变化时重建（避免每次轮询重播动画）
   const sig = watches
-    .map((w) => [w.id, w.state, w.direction, w.strength, w.warn, w.message].join("~"))
+    .map((w) =>
+      [
+        w.id,
+        w.state,
+        w.direction,
+        w.strength,
+        w.warn,
+        w.message,
+        w.last_bar_ts,
+        w.updated_at,
+        w.session_live ? 1 : 0,
+        w.next_bar_close_at || "",
+      ].join("~")
+    )
     .join("|");
-  if (sig === rtGridSig) return;
+  // 签名未变时仍同步休市/倒计时锚点
+  if (sig === rtGridSig) {
+    watches.forEach((w) => {
+      const el = grid.querySelector(`.rt-card[data-id="${CSS.escape(w.id)}"] .rt-countdown`);
+      if (!el) return;
+      if (w.session_live && w.next_bar_close_at) {
+        el.dataset.session = "";
+        el.dataset.nextClose = String(w.next_bar_close_at);
+      } else if (w.state === "ok") {
+        el.dataset.nextClose = "";
+        el.dataset.session = "closed";
+      } else {
+        el.dataset.nextClose = "";
+        el.dataset.session = "";
+      }
+    });
+    return;
+  }
   rtGridSig = sig;
 
   grid.innerHTML = watches
@@ -1851,6 +2101,8 @@ function renderRealtimeGrid(watches) {
       const dir = w.state === "ok" ? RT_DIR[w.direction] || RT_DIR.FLAT : null;
       const color = dir ? dir.color : "#7a8a9e";
       const strength = w.state === "ok" ? w.strength || 0 : 0;
+      const dirKey = w.state === "ok" ? w.direction : null;
+      const plain = w.state === "ok" ? rtSizePlain(strength, dirKey) : null;
       const dirLabel = dir ? dir.label : RT_STATE_LABEL[w.state] || w.state;
       const dirCls = dir ? dir.cls : "rt-flat";
       const srcLabel = (rtSourceById[w.source] || {}).label || w.source;
@@ -1860,9 +2112,7 @@ function renderRealtimeGrid(watches) {
         w.state !== "ok" && w.message
           ? `<div class="rt-msg">${escHtml(w.message)}</div>`
           : "";
-      const strengthAttr =
-        w.state === "ok" ? ` data-count="${strength}" data-fmt="strength"` : "";
-      const strengthText = w.state === "ok" ? METRIC_FMT.strength(strength) : "—";
+      const sizeText = plain ? plain.size : "—";
       return `
     <div class="rt-card ${dirCls}" data-id="${escHtml(w.id)}">
       <button class="rt-remove" data-remove="${escHtml(w.id)}" title="移除监控">×</button>
@@ -1874,7 +2124,7 @@ function renderRealtimeGrid(watches) {
       <div class="rt-gauge">
         ${halfRingGauge(strength, color)}
         <div class="rt-gauge-center">
-          <div class="rt-strength"${strengthAttr}>${strengthText}</div>
+          <div class="rt-strength">${escHtml(sizeText)}</div>
           <div class="rt-dir ${dirCls}">${dirLabel}</div>
         </div>
       </div>
@@ -1885,6 +2135,19 @@ function renderRealtimeGrid(watches) {
       <div class="rt-foot">
         <span class="rt-state ${w.state}">${RT_STATE_LABEL[w.state] || w.state}</span>
         <span class="rt-time">更新 ${rtClock(w.updated_at)}</span>
+        <span class="rt-countdown"${
+          w.session_live && w.next_bar_close_at
+            ? ` data-next-close="${w.next_bar_close_at}"`
+            : w.state === "ok"
+              ? ` data-session="closed"`
+              : ""
+        }>${
+          w.session_live && w.next_bar_close_at
+            ? "距离下次判断 …"
+            : w.state === "ok"
+              ? "休市中"
+              : "距离下次判断 —"
+        }</span>
       </div>
       ${warn}
       ${msg}
@@ -1950,7 +2213,12 @@ async function init() {
   if ($("rtStrategySelect")) $("rtStrategySelect").addEventListener("change", onRtStrategyChange);
   if ($("rtBrowseStrategyBtn")) $("rtBrowseStrategyBtn").addEventListener("click", rtBrowseStrategy);
   if ($("rtAddBtn")) $("rtAddBtn").addEventListener("click", rtAddWatch);
-  if ($("rtEngineToggle")) $("rtEngineToggle").addEventListener("change", (e) => rtToggleEngine(e.target.checked));
+  if ($("rtFeishuSaveBtn")) $("rtFeishuSaveBtn").addEventListener("click", saveRtFeishuSettings);
+  if ($("rtFeishuTestBtn")) $("rtFeishuTestBtn").addEventListener("click", testRtFeishu);
+  if ($("rtFeishuHelpBtn")) $("rtFeishuHelpBtn").addEventListener("click", openRtFeishuHelpModal);
+  document.querySelectorAll("[data-close-feishu-help]").forEach((el) => {
+    el.addEventListener("click", closeRtFeishuHelpModal);
+  });
   if ($("rtGrid")) {
     $("rtGrid").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-remove]");

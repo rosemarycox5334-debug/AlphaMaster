@@ -16,6 +16,12 @@ _DEFAULT = {
     # 回测单边成本（单位 %）：手续费 0.02% + 滑点 0.01% ≈ 常见加密货币轻度成本
     "bt_commission_pct": 0.02,
     "bt_slippage_pct": 0.01,
+    # 实时分析监控清单：[{source, symbol, timeframe, strategy_file}, ...]
+    "realtime_watches": [],
+    # 飞书机器人（信号转折提醒，仅文本）
+    "feishu_enabled": False,
+    "feishu_webhook_url": "",
+    "feishu_secret": "",
 }
 
 
@@ -50,6 +56,25 @@ def load_settings() -> dict:
     out["bt_slippage_pct"] = _as_pct(
         out.get("bt_slippage_pct"), _DEFAULT["bt_slippage_pct"]
     )
+    watches = out.get("realtime_watches")
+    if not isinstance(watches, list):
+        watches = []
+    cleaned = []
+    for w in watches:
+        if not isinstance(w, dict):
+            continue
+        src = str(w.get("source") or "").strip()
+        sym = str(w.get("symbol") or "").strip()
+        tf = str(w.get("timeframe") or "").strip()
+        sf = str(w.get("strategy_file") or "").strip()
+        if src and sym and tf and sf:
+            cleaned.append(
+                {"source": src, "symbol": sym, "timeframe": tf, "strategy_file": sf}
+            )
+    out["realtime_watches"] = cleaned
+    out["feishu_enabled"] = bool(out.get("feishu_enabled", False))
+    out["feishu_webhook_url"] = str(out.get("feishu_webhook_url") or "").strip()
+    out["feishu_secret"] = str(out.get("feishu_secret") or "").strip()
     return out
 
 
@@ -76,6 +101,34 @@ def save_settings(data: dict) -> dict:
         current["bt_slippage_pct"] = _as_pct(
             data["bt_slippage_pct"], _DEFAULT["bt_slippage_pct"]
         )
+    if "realtime_watches" in data:
+        watches = data["realtime_watches"]
+        if not isinstance(watches, list):
+            watches = []
+        cleaned = []
+        for w in watches:
+            if not isinstance(w, dict):
+                continue
+            src = str(w.get("source") or "").strip()
+            sym = str(w.get("symbol") or "").strip()
+            tf = str(w.get("timeframe") or "").strip()
+            sf = str(w.get("strategy_file") or "").strip()
+            if src and sym and tf and sf:
+                cleaned.append(
+                    {
+                        "source": src,
+                        "symbol": sym,
+                        "timeframe": tf,
+                        "strategy_file": sf,
+                    }
+                )
+        current["realtime_watches"] = cleaned
+    if "feishu_enabled" in data:
+        current["feishu_enabled"] = bool(data["feishu_enabled"])
+    if "feishu_webhook_url" in data:
+        current["feishu_webhook_url"] = str(data["feishu_webhook_url"] or "").strip()
+    if "feishu_secret" in data:
+        current["feishu_secret"] = str(data["feishu_secret"] or "").strip()
     SETTINGS_PATH.write_text(
         json.dumps(current, indent=2, ensure_ascii=False),
         encoding="utf-8",

@@ -29,6 +29,18 @@ _CADENCE = {
     "1m": 15, "5m": 30, "15m": 45, "30m": 60,
     "1h": 60, "4h": 120, "1d": 300, "1w": 600, "1M": 600,
 }
+# K 线周期长度（秒）；用于推算「下一根已收盘 bar」时间
+_TF_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+    "1w": 604800,
+    "1M": 2592000,  # 近似 30 天
+}
 _DEFAULT_CADENCE = 60
 _N_BARS = 500                 # 每次拉取的历史 bar 数（喂给特征引擎）
 _HISTORY_LEN = 60             # 保留的信号强度历史点数（供 sparkline）
@@ -37,6 +49,47 @@ _VALID_KINDS = {k for k, _ in SOURCE_KINDS}
 
 def _cadence_for(tf: str) -> int:
     return _CADENCE.get(tf, _DEFAULT_CADENCE)
+
+
+def _next_bar_close_at(last_bar_open: int | None, timeframe: str, now: float | None = None) -> int | None:
+    """根据最后已收盘 bar 的开盘时间，推算下次收盘（即下次信号更新）的 Unix 秒。
+
+    若最后一根已收盘 bar 已过时太久（超过约 2 个周期仍无新 bar），视为休市/断档，
+    返回 None，避免在周末等时段虚构「几分钟后更新」的倒计时。
+    """
+    if last_bar_open is None:
+        return None
+    period = _TF_SECONDS.get(timeframe)
+    if not period:
+        return None
+    now_i = int(now if now is not None else time.time())
+    last_open = int(last_bar_open)
+    last_close = last_open + period
+    # 仍未到收盘（常见于 MT5 终端时钟快于本机、或未剔除形成中 bar）
+    if last_close > now_i:
+        return last_close
+    # 正常交易中：上一根收盘距今至多约 1 个周期；再放宽到 2 个周期容错拉取延迟
+    if now_i - last_close > period * 2:
+        return None
+    # last_open 开盘 → last_close 收盘；当前形成中的 bar 在 +2*period 收盘
+    nxt = last_open + 2 * period
+    while nxt <= now_i:
+        nxt += period
+        if nxt - last_close > period * 2:
+            return None
+    return nxt
+
+
+def _ensure_closed_bars(bars: list, timeframe: str, now: float | None = None) -> list:
+    """按本机时钟再剔掉尚未收盘的 K 线（防止 MT5 时钟偏快时把形成中 bar 当已收盘）。"""
+    period = _TF_SECONDS.get(timeframe)
+    if not period or not bars:
+        return bars
+    now_i = int(now if now is not None else time.time())
+    out = list(bars)
+    while out and int(out[-1].ts) + period > now_i:
+        out.pop()
+    return out
 
 
 def _load_strategy_meta(path: str) -> dict[str, Any]:
@@ -81,6 +134,9 @@ class WatchTask:
     history: deque = field(default_factory=lambda: deque(maxlen=_HISTORY_LEN))
 
     def to_public(self) -> dict[str, Any]:
+        now = time.time()
+        next_close = _next_bar_close_at(self.last_bar_ts, self.timeframe, now)
+        live = next_close is not None
         return {
             "id": self.id,
             "source": self.source,
@@ -97,6 +153,11 @@ class WatchTask:
             "factor_value": self.factor_value,
             "bars_used": self.bars_used,
             "last_bar_ts": self.last_bar_ts,
+            "session_live": live,
+            "next_bar_close_at": next_close,
+            "seconds_to_next": (
+                max(0, int(next_close - now)) if next_close is not None else None
+            ),
             "updated_at": self.updated_at,
             "message": self.message,
             "warn": self.warn,
@@ -223,7 +284,20 @@ class RealtimeManager:
     def status(self) -> dict[str, Any]:
         with self._lock:
             watches = [t.to_public() for t in self._tasks.values()]
-        return {"running": self._running, "count": len(watches), "watches": watches}
+        nearest = None
+        for w in watches:
+            s = w.get("seconds_to_next")
+            if s is None:
+                continue
+            if nearest is None or s < nearest:
+                nearest = s
+        return {
+            "running": self._running,
+            "count": len(watches),
+            "watches": watches,
+            "server_time": time.time(),
+            "nearest_seconds_to_next": nearest,
+        }
 
     # ── 调度线程 ────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -271,6 +345,7 @@ class RealtimeManager:
             return cached[1]
         src = get_source(source)
         bars = src.fetch_bars(symbol, timeframe, _N_BARS, drop_forming=True)
+        bars = _ensure_closed_bars(bars, timeframe)
         self._bar_cache[key] = (now, bars)
         return bars
 
@@ -290,11 +365,29 @@ class RealtimeManager:
             task.last_bar_ts = last_ts
             task.updated_at = time.time()
             if task.state == "ok":
-                task.direction = result["direction"]
+                new_dir = result["direction"]
+                prev_dir = task.direction
+                task.direction = new_dir
                 task.strength = result["strength"]
                 task.position = result["position"]
                 task.factor_value = result["factor_value"]
                 task.history.append(round(result["strength"], 4))
+                # 已有上次方向且发生转折时推飞书（首次算出方向不打扰）
+                if prev_dir and new_dir and prev_dir != new_dir:
+                    try:
+                        from web.feishu_notify import notify_direction_flip
+
+                        notify_direction_flip(
+                            symbol=task.symbol,
+                            timeframe=task.timeframe,
+                            strategy_name=task.strategy_name,
+                            prev_direction=prev_dir,
+                            new_direction=new_dir,
+                            strength=task.strength,
+                            factor_value=task.factor_value,
+                        )
+                    except Exception:
+                        pass
         except Exception as exc:  # noqa: BLE001
             self._set_error(task, str(exc))
         finally:

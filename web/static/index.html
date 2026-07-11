@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=16" />
+  <link rel="stylesheet" href="/static/style.css?v=23" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -408,20 +408,98 @@
           <h2>信号雷达</h2>
           <div class="rt-head-right">
             <span class="hint" id="rtStatusHint">未启动</span>
-            <label class="rt-engine-toggle">
-              <input type="checkbox" id="rtEngineToggle" />
-              <span>引擎</span>
-            </label>
           </div>
         </div>
         <div class="rt-grid" id="rtGrid">
           <div class="metric-empty">尚无监控项。添加「数据源 + 品种 + 周期 + 因子」后开始实时分析。</div>
         </div>
+
+        <details class="chart-metrics-help bt-howto" open>
+          <summary>怎么看信号？还有哪些要注意</summary>
+          <ol class="bt-howto-list">
+            <li>
+              <strong>这张卡怎么看？（一眼看懂）</strong>
+              <ul>
+                <li>先看中间下面那行方向：<strong>预期上涨</strong>（偏多）或<strong>预期下跌</strong>（偏空）。颜色也会跟着变——绿偏多、红偏空。</li>
+                <li>再看大字把握：策略对这个方向有多坚决——一点把握 → 把握不大 → 一半把握 → 比较有把握 → 很有把握。半环亮得越满，把握越大。</li>
+                <li>若显示「没把握 / 先观望」，表示信号太弱，先别当买卖依据。</li>
+                <li>「因子」是内部算出来的分数，负的偏空、正的偏多，一般不用盯着它；看方向 + 把握就够了。</li>
+                <li>这不是「猜对的概率」，只是策略此刻有多坚决。</li>
+              </ul>
+            </li>
+            <li>
+              <strong>只在「当前周期」那根 K 线收盘后才重新判断</strong>
+              <p>例如选的是 1 小时周期，就等这一小时走完、K 线正式收盘，才会用最新已收盘的数据重算方向和把握；盘中正在走的那根（未收盘）不会拿来改信号。</p>
+            </li>
+            <li>
+              <strong>为什么这样设计</strong>
+              <p>训练和回测用的都是「已经收盘」的完整 K 线。若盘中用还在变动的价格去算，同一根线里信号会来回跳，也和回测看到的历史不一致，容易误判、频繁改仓。</p>
+              <p>等收盘再用完整 OHLC，信号更稳，也和策略当初学到的数据口径一致。</p>
+            </li>
+            <li>
+              <strong>相同品种、不同周期，能不能套同一个策略？</strong>
+              <p>不建议。策略是按<strong>训练时的那个周期</strong>学出来的；公式里的「10 根、20 根」指的是该周期的 K 线根数，不是固定的钟表时间。</p>
+              <p>例如在 1 小时上训练时，「10 根」大约看过去 10 小时；若硬套到日线，「10 根」就变成过去 10 天——价格形态、噪声幅度、趋势节奏全变了，信号含义对不上，回测成绩也推不到新周期上。</p>
+              <p>同品种换周期应重新训练（或至少用该周期单独回测验证）；实时监控时，周期尽量与策略文件里记录的周期一致。</p>
+            </li>
+            <li>
+              <strong>卡片上的「距离下次判断」在倒计什么</strong>
+              <p>倒计时指向下一次收盘、重新判断信号的时刻。到点后会短暂显示「即将重新判断…」，收到新 bar 后再刷新，并开始下一轮倒计时。</p>
+            </li>
+          </ol>
+        </details>
+      </section>
+
+      <section class="panel rt-feishu-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <h2>飞书转折提醒</h2>
+        <p class="rt-feishu-desc">
+          仅在信号方向发生变化时推送文字提醒（例如看涨 → 不确定 / 看跌）。
+          在飞书群添加自定义机器人后，把 Webhook 地址填到下面。
+        </p>
+        <div class="rt-feishu-form">
+          <label class="rt-feishu-enable">
+            <input type="checkbox" id="rtFeishuEnabled" />
+            <span>启用飞书提醒</span>
+          </label>
+          <label class="rt-field rt-field-wide">
+            <span>Webhook URL</span>
+            <input type="text" id="rtFeishuWebhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…" autocomplete="off" />
+          </label>
+          <label class="rt-field rt-field-wide">
+            <span>签名密钥（可选）</span>
+            <input type="password" id="rtFeishuSecret" placeholder="机器人开启签名校验时填写，否则留空" autocomplete="off" />
+          </label>
+          <div class="rt-actions rt-feishu-actions">
+            <button type="button" class="btn btn-secondary" id="rtFeishuTestBtn">发送测试</button>
+            <button type="button" class="btn btn-primary" id="rtFeishuSaveBtn">保存</button>
+            <button type="button" class="btn btn-feishu-help" id="rtFeishuHelpBtn">怎么使用飞书功能</button>
+          </div>
+        </div>
+        <small class="field-hint" id="rtFeishuHint">保存后，监控项方向转折时会自动推送到飞书群。</small>
       </section>
     </div><!-- /page-realtime -->
+
+    <div class="modal" id="rtFeishuHelpModal" hidden>
+      <div class="modal-backdrop" data-close-feishu-help></div>
+      <div class="modal-card modal-card-feishu-help" role="dialog" aria-labelledby="rtFeishuHelpTitle">
+        <h3 id="rtFeishuHelpTitle">怎么使用飞书功能</h3>
+        <div class="modal-body modal-body-feishu-help">
+          去问龙虾AlphaMaster这个项目怎么使用飞书功能，一步一步教我<br>
+          还是搞不定的话<br>
+          可以联系阿尔法本人QQ：564020069<br><br>
+          赞助49.9元可以帮你远程协助完成飞书设置<br><br>
+          如果之前已经支付过49.9元了，这次只需要赞助30元即可
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-primary" data-close-feishu-help>知道了</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=40"></script>
+  <script src="/static/app.js?v=52"></script>
 </body>
 </html>

@@ -108,6 +108,17 @@ class RemoveWatchRequest(BaseModel):
     id: str
 
 
+class FeishuSettingsRequest(BaseModel):
+    enabled: bool | None = None
+    webhook_url: str | None = None
+    secret: str | None = None
+
+
+class FeishuTestRequest(BaseModel):
+    webhook_url: str | None = None
+    secret: str | None = None
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     started = time.perf_counter()
@@ -921,6 +932,56 @@ def api_realtime_start() -> dict[str, Any]:
 def api_realtime_stop() -> dict[str, Any]:
     realtime_manager.stop()
     return {"ok": True, "running": False}
+
+
+@app.get("/api/realtime/feishu")
+def api_realtime_feishu_get() -> dict[str, Any]:
+    s = load_settings()
+    return {
+        "enabled": bool(s.get("feishu_enabled")),
+        "webhook_url": s.get("feishu_webhook_url") or "",
+        "secret": s.get("feishu_secret") or "",
+    }
+
+
+@app.put("/api/realtime/feishu")
+def api_realtime_feishu_put(req: FeishuSettingsRequest) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if req.enabled is not None:
+        payload["feishu_enabled"] = bool(req.enabled)
+    if req.webhook_url is not None:
+        payload["feishu_webhook_url"] = req.webhook_url
+    if req.secret is not None:
+        payload["feishu_secret"] = req.secret
+    saved = save_settings(payload)
+    return {
+        "ok": True,
+        "enabled": bool(saved.get("feishu_enabled")),
+        "webhook_url": saved.get("feishu_webhook_url") or "",
+        "secret": saved.get("feishu_secret") or "",
+    }
+
+
+@app.post("/api/realtime/feishu/test")
+def api_realtime_feishu_test(req: FeishuTestRequest) -> dict[str, Any]:
+    from web.feishu_notify import send_text
+
+    url = (req.webhook_url or "").strip()
+    if not url:
+        url = (load_settings().get("feishu_webhook_url") or "").strip()
+    if not url:
+        raise HTTPException(400, "请先填写 Webhook URL")
+    secret = req.secret
+    if secret is None:
+        secret = load_settings().get("feishu_secret") or ""
+    ok, msg = send_text(
+        "✅ AlphaMaster 飞书通知测试：配置正常。信号方向转折时会推送提醒。",
+        webhook_url=url,
+        secret=secret or "",
+    )
+    if not ok:
+        raise HTTPException(400, msg)
+    return {"ok": True, "message": msg}
 
 
 @app.get("/")

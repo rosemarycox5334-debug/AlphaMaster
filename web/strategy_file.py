@@ -27,7 +27,11 @@ def strategy_path_for_symbol(symbol: str) -> Path:
 
 
 def symbol_from_strategy_path(path: Path) -> str | None:
-    m = _BEST_NAME_RE.match(path.name)
+    name = path.name
+    m = _BEST_NAME_RE.match(name)
+    if m:
+        return m.group(1)
+    m = _STRATEGY_EXPORT_RE.match(name)
     if m:
         return m.group(1)
     return None
