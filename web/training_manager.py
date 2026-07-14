@@ -67,6 +67,7 @@ class TrainingManager:
         self._job: TrainingJob | None = None
         self._log_fp = None
         self._stopped_by_user = False
+        self._recorded_log_paths: set[str] = set()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -211,7 +212,27 @@ class TrainingManager:
             except Exception:
                 pass
             self._log_fp = None
+        self._record_session_time()
         self._proc = None
+
+    def _record_session_time(self) -> None:
+        job = self._job
+        if job is None or not job.log_path or not job.started_at:
+            return
+        rel = job.log_path.replace("\\", "/")
+        if rel in self._recorded_log_paths:
+            return
+        if job.state == JobState.RUNNING:
+            return
+        from web.training_time import record_training_session
+
+        record_training_session(
+            symbol=job.symbol,
+            started_at=job.started_at,
+            finished_at=job.finished_at,
+            log_path=rel,
+        )
+        self._recorded_log_paths.add(rel)
 
 
 training_manager = TrainingManager()

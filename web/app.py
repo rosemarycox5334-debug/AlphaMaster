@@ -44,6 +44,7 @@ from web.strategy_file import (
     sync_best_strategy_for_symbol,
 )
 from web.training_manager import training_manager
+from web.training_time import get_training_time_summary
 from web.training_package import build_training_export_zip, import_training_package
 from web.backtest_manager import backtest_manager
 from web.realtime_manager import realtime_manager
@@ -492,6 +493,22 @@ def _progress_with_live_step(symbol: str, active: bool) -> dict[str, Any]:
     }
 
 
+def _attach_training_time(
+    row: dict[str, Any] | None,
+    *,
+    symbol: str | None,
+    job: dict[str, Any] | None,
+    active: bool,
+) -> dict[str, Any] | None:
+    if not row or not symbol:
+        return row
+    summary = get_training_time_summary(symbol, job=job, active=active)
+    row = dict(row)
+    row["session_seconds"] = summary.session_seconds
+    row["history_total_seconds"] = summary.history_total_seconds
+    return row
+
+
 @app.get("/api/overview")
 def api_overview() -> dict[str, Any]:
     settings = load_settings()
@@ -499,10 +516,15 @@ def api_overview() -> dict[str, Any]:
     file_info = None
     progress = None
 
+    training = training_manager.status()
+    job = training.get("job")
+    active = bool(training.get("active"))
+
     if data_file:
         try:
             file_info = inspect_parquet_file(data_file)
-            row = _progress_with_live_step(file_info["symbol"], active=False)
+            sym = file_info.get("symbol")
+            row = _progress_with_live_step(sym, active=False)
             progress = {
                 "symbol": row["symbol"],
                 "status": row["status"],
@@ -515,13 +537,15 @@ def api_overview() -> dict[str, Any]:
                 "has_checkpoint": row.get("has_checkpoint", False),
                 "has_strategy": row.get("has_strategy", False),
             }
+            progress = _attach_training_time(
+                progress, symbol=sym, job=job, active=active and job and job.get("symbol") == sym
+            )
         except Exception as e:
             file_info = {"data_file": data_file, "valid": False, "message": str(e)}
 
-    training = training_manager.status()
-    job = training.get("job")
-    if job and job.get("symbol") and training.get("active"):
-        row = _progress_with_live_step(job["symbol"], active=True)
+    if job and job.get("symbol") and active:
+        sym = job["symbol"]
+        row = _progress_with_live_step(sym, active=True)
         progress = {
             "symbol": row["symbol"],
             "status": "running_job",
@@ -534,6 +558,7 @@ def api_overview() -> dict[str, Any]:
             "has_checkpoint": row.get("has_checkpoint", False),
             "has_strategy": row.get("has_strategy", False),
         }
+        progress = _attach_training_time(progress, symbol=sym, job=job, active=True)
 
     return {
         "data_file": file_info,

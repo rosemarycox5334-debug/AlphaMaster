@@ -257,7 +257,8 @@ function renderDataFileCard(info) {
       <div class="item"><span class="label">K线</span><span class="value">${info.bars?.toLocaleString()}</span></div>
       <div class="item"><span class="label">数据年限</span><span class="value">${yearsText}</span></div>
       <div class="item"><span class="label">进度</span><span class="value" id="fileProgressPct">—</span></div>
-      <div class="item"><span class="label">已训练</span><span class="value" id="fileElapsedTime">—</span></div>
+      <div class="item"><span class="label">本次训练时长</span><span class="value" id="fileElapsedTime">—</span></div>
+      <div class="item"><span class="label">历史训练总时长</span><span class="value" id="fileHistoryElapsedTime">—</span></div>
       <div class="item"><span class="label">最优分数</span><span class="value score-best" id="fileBestScore">—</span></div>
       <div class="item"><span class="label">验证分数</span><span class="value score-val" id="fileValScore">—</span></div>
     </div>
@@ -327,15 +328,46 @@ function renderStrategyFileCard(info) {
   updateBtStartBtn();
 }
 
-function formatElapsed(startedAtIso) {
+function formatElapsed(startedAtIso, endAtIso) {
   if (!startedAtIso) return "—";
   const started = new Date(startedAtIso).getTime();
   if (Number.isNaN(started)) return "—";
-  const secs = Math.max(0, Math.floor((Date.now() - started) / 1000));
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
+  const end = endAtIso ? new Date(endAtIso).getTime() : Date.now();
+  if (Number.isNaN(end)) return "—";
+  return formatDurationSeconds(Math.max(0, Math.floor((end - started) / 1000)));
+}
+
+function formatDurationSeconds(secs) {
+  if (secs == null || secs < 0) return "—";
+  const total = Math.floor(secs);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
   if (h > 0) return `${h}小时${m}分`;
-  return `${m}分钟`;
+  if (m > 0) return `${m}分钟`;
+  return `${total}秒`;
+}
+
+function updateTrainingTimeFields(progress, training) {
+  const sessionEl = $("fileElapsedTime");
+  const historyEl = $("fileHistoryElapsedTime");
+  if (!sessionEl && !historyEl) return;
+
+  if (historyEl) {
+    const hist = progress?.history_total_seconds;
+    historyEl.textContent = hist != null ? formatDurationSeconds(hist) : "—";
+  }
+
+  const job = training?.job;
+  const active = !!training?.active;
+  if (!sessionEl) return;
+
+  if (!job || job.state === "idle") {
+    sessionEl.textContent = "—";
+    return;
+  }
+
+  const elapsed = formatElapsed(job.started_at, active ? null : job.finished_at);
+  sessionEl.textContent = active || elapsed === "—" ? elapsed : `${elapsed}（已停）`;
 }
 
 function updateFileProgress(progress) {
@@ -552,15 +584,13 @@ function renderStrategies(rows) {
     .join("");
 }
 
-function updateTrainingUI(training) {
+function updateTrainingUI(training, progress) {
   const job = training?.job;
   const active = training?.active;
   const pill = $("jobPill");
   const startBtn = $("startBtn");
   const retrainBtn = $("retrainBtn");
   const stopBtn = $("stopBtn");
-
-  const elapsedEl = $("fileElapsedTime");
 
   if (!job || job.state === "idle") {
     pill.innerHTML = '<i class="pill-dot"></i>空闲';
@@ -569,7 +599,7 @@ function updateTrainingUI(training) {
     if (retrainBtn) retrainBtn.disabled = !selectedDataFile;
     stopBtn.disabled = true;
     $("logHint").textContent = "—";
-    if (elapsedEl) elapsedEl.textContent = "—";
+    updateTrainingTimeFields(progress, training);
     return;
   }
 
@@ -588,10 +618,7 @@ function updateTrainingUI(training) {
   if (retrainBtn) retrainBtn.disabled = active;
   stopBtn.disabled = !active;
   $("logHint").textContent = job.log_path || "—";
-  if (elapsedEl) {
-    const elapsed = formatElapsed(job.started_at);
-    elapsedEl.textContent = active || elapsed === "—" ? elapsed : `${elapsed}（已停）`;
-  }
+  updateTrainingTimeFields(progress, training);
 
   const logView = $("logView");
   const atBottom = isViewAtBottom(logView);
@@ -620,7 +647,7 @@ async function refreshOverview() {
   updateFileProgress(overview.progress);
   updateExportBtn(overview.progress, strategies.strategies);
   updateTrainingBtns(overview.progress, training);
-  updateTrainingUI(training);
+  updateTrainingUI(training, overview.progress);
   renderStrategies(strategies.strategies);
 
   const sym = overview.progress?.symbol || selectedSymbol || training?.job?.symbol;

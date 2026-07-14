@@ -1,0 +1,26 @@
+{
+  "symbol": "XAUUSD",
+  "sessions": [
+    {
+      "log_path": "logs/train_XAUUSD_20260713_100546.log",
+      "started_at": "2026-07-13T10:05:46+00:00",
+      "finished_at": "2026-07-13T12:31:26.268836+00:00",
+      "seconds": 8740,
+      "source": "log_backfill"
+    },
+    {
+      "log_path": "logs/train_XAUUSD_20260713_133709.log",
+      "started_at": "2026-07-13T13:37:09+00:00",
+      "finished_at": "2026-07-14T03:17:27.415464+00:00",
+      "seconds": 49218,
+      "source": "log_backfill"
+    },
+    {
+      "log_path": "logs/train_XAUUSD_20260714_033057.log",
+      "started_at": "2026-07-14T03:30:57+00:00",
+      "finished_at": "2026-07-14T07:23:03.906968+00:00",
+      "seconds": 13926,
+      "source": "log_backfill"
+    }
+  ]
+}
