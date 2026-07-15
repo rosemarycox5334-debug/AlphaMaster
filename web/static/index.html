@@ -80,7 +80,26 @@
             <div class="data-file-empty">尚未选择数据文件</div>
           </div>
         </div>
+        <div class="launch-row ashare-download-row">
+          <label for="aShareCodeInput">A股代码</label>
+          <input id="aShareCodeInput" type="text" inputmode="numeric" maxlength="6" placeholder="例如 002192" />
+          <button type="button" class="btn btn-secondary" id="aShareDownloadBtn">下载日线数据</button>
+          <span class="field-hint" id="aShareDownloadStatus">优先东方财富前复权；网络不可用时自动切换通达信未复权数据</span>
+        </div>
         <div class="launch-actions" role="group" aria-label="训练操作">
+          <label class="field-inline" for="trainDevice">训练设备
+            <select id="trainDevice">
+              <option value="cpu" selected>CPU（默认）</option>
+              <option value="cuda">GPU（CUDA）</option>
+              <option value="auto">自动选择</option>
+            </select>
+          </label>
+          <label class="field-inline" for="trainMarket">市场
+            <select id="trainMarket">
+              <option value="generic" selected>通用市场</option>
+              <option value="a_share">A股</option>
+            </select>
+          </label>
           <button class="btn btn-primary" id="startBtn" disabled>开始训练</button>
           <button class="btn btn-secondary" id="retrainBtn" disabled title="清除检查点，从头重新搜索（保留已有更优策略）">重新训练</button>
           <button class="btn btn-danger" id="stopBtn" disabled>停止</button>
@@ -90,7 +109,21 @@
           <button class="btn btn-secondary" id="importTrainingBtn" disabled title="上传 .zip 或 .pt，下次训练断点续训">导入训练</button>
           <input type="file" id="importTrainingFile" accept=".zip,.pt" hidden />
         </div>
-        <small class="field-hint">强制离线：只用本地 Parquet，不连接 MT5。命名：<code>{品种}_{周期}.parquet</code>，如 <code>XAUUSD_H1.parquet</code> / <code>002008_60min.parquet</code>（<code>60min</code>/<code>1h</code> 等同 <code>H1</code>）</small>
+        <details class="training-config-panel">
+          <summary>训练与数据集参数</summary>
+          <div class="training-config-grid">
+            <label><span>训练步数</span><input id="cfgTrainSteps" type="number" min="1" max="100000" value="9000" /></label>
+            <label><span>批量公式数</span><input id="cfgBatchSize" type="number" min="16" max="1024" value="192" /></label>
+            <label><span>公式最大长度</span><input id="cfgFormulaLen" type="number" min="2" max="20" value="8" /></label>
+            <label><span>训练集比例</span><input id="cfgTrainRatio" type="number" min="0.5" max="0.95" step="0.05" value="0.8" /></label>
+            <label><span>Walk-forward 折数</span><input id="cfgFolds" type="number" min="1" max="10" value="3" /></label>
+            <label><span>训练/验证间隔</span><input id="cfgGap" type="number" min="0" max="1000" value="20" /></label>
+            <label><span>随机种子</span><input id="cfgSeed" type="number" value="2026" /></label>
+          </div>
+          <p class="field-hint">按时间顺序划分，不随机打乱。训练集比例决定第一段训练区间；多折验证会逐步扩展训练窗口。间隔用于隔离训练和验证，降低相邻样本泄漏。</p>
+          <p class="field-hint valid" id="trainingSplitPreview">选择数据文件后显示实际划分数量</p>
+        </details>
+        <small class="field-hint">强制离线：只用本地 Parquet，不连接 MT5。A股模式启用只做多、T+1、一字涨停禁买和一字跌停禁卖；历史 ST 的 5% 涨跌停需额外 ST 状态数据，当前按所属板块标准限制处理。</small>
       </div>
     </section>
 
@@ -270,6 +303,14 @@
             </div>
           </div>
           <div class="launch-row bt-cost-row">
+            <label class="bt-cost-field">
+              <span>市场</span>
+              <select id="btMarket">
+                <option value="" selected>跟随策略</option>
+                <option value="generic">通用市场</option>
+                <option value="a_share">A股</option>
+              </select>
+            </label>
             <label class="bt-cost-field">
               <span>手续费（单边 %）</span>
               <input type="number" id="btCommissionInput" min="0" max="5" step="0.01" value="0.02" />

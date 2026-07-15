@@ -22,6 +22,7 @@ import torch
 from torch import Tensor
 
 from strategy_manager.signal import compute_target_positions_stateless
+from strategy_manager.market_rules import apply_market_constraints, normalize_market
 from .config import ModelConfig
 
 _H1_PERIODS_PER_YEAR = 6240
@@ -35,9 +36,21 @@ class MT5Backtest:
         self,
         cost_rate:        float = 0.0001,
         periods_per_year: int   = _H1_PERIODS_PER_YEAR,
+        market:           str   = "generic",
+        raw_dict:         dict[str, Tensor] | None = None,
+        symbols:          list[str] | None = None,
     ):
         self.cost_rate        = cost_rate
         self.periods_per_year = periods_per_year
+        self.market = normalize_market(market)
+        self.raw_dict = raw_dict
+        self.symbols = symbols or []
+
+    def _positions(self, factors: Tensor) -> Tensor:
+        desired = compute_target_positions_stateless(factors)
+        return apply_market_constraints(
+            desired, self.raw_dict, market=self.market, symbols=self.symbols
+        )
 
     # ──────────────────────────────────────────────────────────────────────
     # 基础统计
@@ -320,7 +333,7 @@ class MT5Backtest:
           - OOS Sortino <= 0：乘以 0.1~0.5 惩罚，强制冠军必须在验证段盈利
           - OOS Sortino > 0：乘以最多 1.2 奖励
         """
-        position = compute_target_positions_stateless(factors)  # neutral band
+        position = self._positions(factors)
 
         prev_pos = torch.roll(position, 1, dims=1)
         prev_pos[:, 0] = 0.0
@@ -431,7 +444,7 @@ class MT5Backtest:
         exp_pen      = self._exposure_penalty(position)
 
         if N == 1:
-            beta_pen = self._beta_neutral_penalty(position)
+            beta_pen = 0.0 if self.market == "a_share" else self._beta_neutral_penalty(position)
             consist = self._half_consistency_bonus(pnl)
 
             if ModelConfig.REWARD_MODE == "forex":
@@ -493,7 +506,7 @@ class MT5Backtest:
             per_sym_sortino, per_sym_trade_count, eval_bars=eval_bars
         )
         cost_s   = self._cost_stress(position, target_ret)
-        beta_pen = self._beta_neutral_penalty(position)
+        beta_pen = 0.0 if self.market == "a_share" else self._beta_neutral_penalty(position)
         consist  = self._half_consistency_bonus(pnl)
 
         if ModelConfig.REWARD_MODE == "ftmo":
@@ -535,7 +548,7 @@ class MT5Backtest:
         target_ret: Tensor,
     ) -> tuple[Tensor, float]:
         """评估一组 Alpha 因子（含 OOS 80/20 门控）。"""
-        position = compute_target_positions_stateless(factors)
+        position = self._positions(factors)
 
         prev_pos = torch.roll(position, 1, dims=1)
         prev_pos[:, 0] = 0.0

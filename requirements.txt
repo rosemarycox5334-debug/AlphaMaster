@@ -23,6 +23,7 @@ seaborn>=0.12.0
 MetaTrader5>=5.0.45
 tushare>=1.2.89
 pytdx>=1.72
+efinance>=0.5.8
 requests>=2.31.0
 # TradingView (tvDatafeed) — install via git if the VCS line fails on your network:
 #   python -m pip install git+https://github.com/rongardF/tvdatafeed.git

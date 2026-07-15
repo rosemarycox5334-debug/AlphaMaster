@@ -69,6 +69,15 @@ app.add_middleware(
 class StartTrainingRequest(BaseModel):
     data_file: str
     from_scratch: bool = False
+    device: str = "cpu"
+    market: str = "generic"
+    train_steps: int = 9000
+    batch_size: int = 192
+    max_formula_len: int = 8
+    train_ratio: float = 0.8
+    folds: int = 3
+    gap: int = 20
+    seed: int = 2026
 
 
 class ClientLogRequest(BaseModel):
@@ -93,10 +102,15 @@ class AnalyzeTrainingRequest(BaseModel):
     symbol: str | None = None
 
 
+class DownloadAShareRequest(BaseModel):
+    symbol: str
+
+
 class StartBacktestRequest(BaseModel):
     strategy_file: str
     commission_pct: float | None = None
     slippage_pct: float | None = None
+    market: str | None = None
 
 
 class AddWatchRequest(BaseModel):
@@ -457,6 +471,38 @@ def api_browse_data_file() -> dict[str, Any]:
     return _browse_data_file()
 
 
+@app.post("/api/a-share/download")
+def api_download_a_share(req: DownloadAShareRequest) -> dict[str, Any]:
+    from download_a_stock import download_a_stock
+
+    symbol = req.symbol.strip()
+    try:
+        result = download_a_stock(symbol, out_dir=ROOT / "data")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("A股数据下载失败: %s", symbol)
+        raise HTTPException(502, f"A股数据下载失败: {exc}") from exc
+
+    try:
+        info = inspect_parquet_file(result["data_file"])
+    except ValueError as exc:
+        return {
+            "ok": True,
+            "training_ready": False,
+            **result,
+            "valid": False,
+            "message": str(exc),
+        }
+    save_settings({"last_data_file": info["data_file"]})
+    return {
+        "ok": True,
+        "training_ready": True,
+        **result,
+        **info,
+    }
+
+
 @app.post("/api/strategy-file/browse")
 @app.get("/api/strategy-file/browse")
 def api_browse_strategy_file() -> dict[str, Any]:
@@ -475,14 +521,16 @@ def api_sync_best_strategy(symbol: str | None = None) -> dict[str, Any]:
     return {"ok": True, **info}
 
 
-def _progress_with_live_step(symbol: str, active: bool) -> dict[str, Any]:
+def _progress_with_live_step(
+    symbol: str, active: bool, train_steps_override: int | None = None
+) -> dict[str, Any]:
     p = get_symbol_progress(symbol)
     current_step = p.current_step
     if active:
         live = training_manager.parse_step_from_log()
         if live is not None:
             current_step = max(current_step, live)
-    train_steps = p.train_steps
+    train_steps = train_steps_override or p.train_steps
     progress_pct = min(100.0, 100.0 * current_step / train_steps) if train_steps > 0 else 0.0
     val_score = None
     hist = p.history or {}
@@ -559,7 +607,9 @@ def api_overview() -> dict[str, Any]:
 
     if job and job.get("symbol") and active:
         sym = job["symbol"]
-        row = _progress_with_live_step(sym, active=True)
+        row = _progress_with_live_step(
+            sym, active=True, train_steps_override=int(job.get("train_steps") or 0) or None
+        )
         progress = {
             "symbol": row["symbol"],
             "status": "running_job",
@@ -681,6 +731,23 @@ def api_training_status() -> dict[str, Any]:
 
 @app.post("/api/training/start")
 def api_training_start(req: StartTrainingRequest) -> dict[str, Any]:
+    device = req.device.strip().lower()
+    if device not in {"auto", "cpu", "cuda"}:
+        raise HTTPException(400, "训练设备必须是 auto、cpu 或 cuda")
+    market = req.market.strip().lower()
+    if market not in {"generic", "a_share"}:
+        raise HTTPException(400, "市场必须是 generic 或 a_share")
+    bounds = [
+        (1 <= req.train_steps <= 100_000, "训练步数必须为 1～100000"),
+        (16 <= req.batch_size <= 1024, "批量公式数必须为 16～1024"),
+        (2 <= req.max_formula_len <= 20, "公式最大长度必须为 2～20"),
+        (0.5 <= req.train_ratio <= 0.95, "训练集比例必须为 0.50～0.95"),
+        (1 <= req.folds <= 10, "验证折数必须为 1～10"),
+        (0 <= req.gap <= 1000, "间隔必须为 0～1000"),
+    ]
+    for ok, message in bounds:
+        if not ok:
+            raise HTTPException(400, message)
     info = _inspect_or_http(req.data_file)
     save_settings({"last_data_file": info["data_file"]})
     try:
@@ -689,6 +756,15 @@ def api_training_start(req: StartTrainingRequest) -> dict[str, Any]:
             symbol=info["symbol"],
             timeframe=info["timeframe"],
             mode="ftmo",
+            device=device,
+            market=market,
+            train_steps=req.train_steps,
+            batch_size=req.batch_size,
+            max_formula_len=req.max_formula_len,
+            train_ratio=req.train_ratio,
+            folds=req.folds,
+            gap=req.gap,
+            seed=req.seed,
             from_scratch=bool(req.from_scratch),
         )
     except RuntimeError as e:
@@ -821,6 +897,9 @@ def api_backtest_status() -> dict[str, Any]:
 @app.post("/api/backtest/start")
 def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
     info = _inspect_strategy_or_http(req.strategy_file)
+    market = (req.market or info.get("market") or "generic").strip().lower()
+    if market not in {"generic", "a_share"}:
+        raise HTTPException(400, "市场必须是 generic 或 a_share")
     settings = load_settings()
     commission = (
         float(req.commission_pct)
@@ -887,6 +966,7 @@ def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
             data_file=data_file,
             commission_pct=commission,
             slippage_pct=slippage,
+            market=market,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
