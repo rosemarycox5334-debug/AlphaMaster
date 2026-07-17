@@ -106,6 +106,46 @@ class MT5Backtest:
         stability = ic_mean / (ic_std + 1e-6)
         return float(max(-3.0, min(3.0, stability)))
 
+    def _cross_sectional_ic(self, factors: Tensor, target_ret: Tensor) -> float:
+        """截面 Rank-IC：每时间步对 N 只股票的 factor[t] 与 ret[t+1] 求
+        Spearman 秩相关，再对时间取均值。适合 A股选股（N 大，横截面统计强）。
+
+        Returns: float ∈ [-1,1]，正值代表因子选股方向正确。
+        """
+        N, T = factors.shape
+        if N < 3 or T < 2:
+            return 0.0
+
+        def _rank(x: Tensor) -> Tensor:
+            # 沿 N 维求秩（每列独立），返回 [N] 或 [N,T]
+            order = x.argsort(dim=0)
+            ranks = torch.zeros_like(x)
+            idx = torch.arange(x.shape[0], dtype=x.dtype, device=x.device)
+            if x.dim() == 1:
+                ranks.scatter_(0, order, idx)
+            else:
+                ranks.scatter_(0, order, idx.unsqueeze(1).expand_as(x))
+            return ranks
+
+        ic_list = []
+        for t in range(T - 1):
+            fx = factors[:, t]
+            fy = target_ret[:, t + 1]
+            rx = _rank(fx)
+            ry = _rank(fy)
+            rxm = rx - rx.mean()
+            rym = ry - ry.mean()
+            sx = (rxm ** 2).mean().sqrt()
+            sy = (rym ** 2).mean().sqrt()
+            if sx < 1e-6 or sy < 1e-6:
+                continue
+            ic = (rxm * rym).mean() / (sx * sy + 1e-8)
+            ic_list.append(ic.item())
+
+        if not ic_list:
+            return 0.0
+        return float(sum(ic_list) / len(ic_list))
+
     def _symbol_consistency(
         self,
         per_symbol_sortino: list[float],
@@ -418,6 +458,23 @@ class MT5Backtest:
         2026-07-08: 新增 forex 模式 — 偏向均值回归策略。
         """
         N = pnl.shape[0]
+
+        if ModelConfig.REWARD_MODE == "ashare":
+            # A股截面选股模式：主权重给截面 Rank-IC + IC 稳定性，
+            # 弱化外汇特有的年化收益/beta 惩罚（截面排序不关心绝对多空）。
+            cs_ic = self._cross_sectional_ic(factors, target_ret)
+            ts_ic = self._ts_ic_stability(factors, target_ret)   # IC_IR 作稳定性
+            tq    = self._turnover_quality(position)
+            exp_pen = self._exposure_penalty(position)
+            return (
+                torch.tensor(
+                    0.70 * cs_ic          # 主目标：截面 Rank-IC（选股方向）
+                    + 0.20 * ts_ic        # IC 稳定性（IR）
+                    + 0.05 * tq,          # 换手质量
+                    dtype=torch.float32,
+                )
+                + exp_pen                  # 稀疏惩罚（张量）
+            )
 
         # ── 绝对收益（年化 log return）──────────────────────────────────
         # 连续仓位 pnl = position * target_ret - turnover * cost。

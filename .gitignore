@@ -115,3 +115,6 @@ secrets/
 *.key
 credentials*.json
 local_settings*.json
+
+# OMC 工具状态与临时探测文件
+.omc/

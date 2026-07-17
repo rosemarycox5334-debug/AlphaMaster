@@ -163,17 +163,6 @@ class ParquetDataManager:
             raise ValueError(f"Parquet 缺少列: {missing}")
 
         sub = df[required].copy().rename(columns={volume_col: "volume"})
-
-        # 兼容性修复：某些 A 股 parquet 导出工具把 Unix 秒时间戳误存为
-        # "秒/1000"（数值被缩小 1000 倍，导致日期变成 1970 年）。
-        # 若最大时间戳 < 1e7（1970-04-27 之前），则视为被除过 1000，乘回。
-        if pd.api.types.is_numeric_dtype(sub["time"]) and sub["time"].max() < 10_000_000:
-            sub["time"] = sub["time"] * 1000
-            logger.info(
-                f"[数据] {self.file_path.name} 时间戳被识别为秒/1000，"
-                f"已乘 1000 恢复为 Unix 秒。"
-            )
-
         sub = sub.sort_values("time")
         sub = sub[~sub["time"].duplicated(keep="last")]
 

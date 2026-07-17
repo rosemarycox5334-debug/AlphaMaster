@@ -47,6 +47,7 @@ from web.training_manager import training_manager
 from web.training_time import get_training_time_summary
 from web.training_package import build_training_export_zip, import_training_package
 from web.backtest_manager import backtest_manager
+from web.paper_manager import paper_manager
 from web.realtime_manager import realtime_manager
 from web.data_sources.factory import list_sources
 from strategy_manager.live_signal import min_exposure
@@ -1098,6 +1099,47 @@ def api_realtime_feishu_test(req: FeishuTestRequest) -> dict[str, Any]:
     if not ok:
         raise HTTPException(400, msg)
     return {"ok": True, "message": msg}
+
+
+class PaperReplayReq(BaseModel):
+    strategy_file: str = "strategies/best_ashare_universe.json"
+    start: str = "2023-01-01"
+    end: str = "2026-06-30"
+    sim_start: str = "2026-06-01"
+
+
+@app.post("/api/paper/replay/start")
+def paper_replay_start(req: PaperReplayReq):
+    try:
+        job = paper_manager.start(req.strategy_file, req.start, req.end, req.sim_start)
+        return {"ok": True, "job": job.to_dict()}
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/paper/replay/stop")
+def paper_replay_stop():
+    return {"ok": paper_manager.stop()}
+
+
+@app.get("/api/paper/status")
+def paper_status():
+    return paper_manager.status()
+
+
+@app.get("/api/paper/equity")
+def paper_equity():
+    return {"equity": paper_manager.equity()}
+
+
+@app.get("/api/paper/trades")
+def paper_trades():
+    return {"trades": paper_manager.trades()}
+
+
+@app.get("/api/paper/metrics")
+def paper_metrics():
+    return {"metrics": paper_manager.metrics()}
 
 
 @app.get("/")

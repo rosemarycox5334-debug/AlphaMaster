@@ -22,6 +22,7 @@ seaborn>=0.12.0
 # ===== Trading Platforms / Market Data =====
 MetaTrader5>=5.0.45
 tushare>=1.2.89
+akshare>=1.12.0
 pytdx>=1.72
 requests>=2.31.0
 # TradingView (tvDatafeed) — install via git if the VCS line fails on your network:

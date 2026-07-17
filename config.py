@@ -137,6 +137,18 @@ class Config:
     # ── 风控参数 ──────────────────────────────────────────
     RISK_PER_TRADE     = 0.01      # legacy: 保留给旧接口/测试；实盘仓位使用 VOL_TARGET_* 参数
     COST_RATE          = 0.0001    # 单边点差+佣金（forex/metals）
+
+    # ── A股虚拟炒股平台配置（2026-07-16）───────────────────────
+    ASHARE_INITIAL_CAPITAL = 1_000_000.0   # 起始资金 100 万
+    ASHARE_TOP_K           = 10            # 每日持仓只数（等权）
+    ASHARE_COMMISSION_RATE = 0.00025       # 双边佣金费率 万2.5
+    ASHARE_MIN_COMMISSION  = 5.0           # 单笔最低佣金 5 元
+    ASHARE_STAMP_TAX       = 0.001         # 卖出印花税 千1
+    ASHARE_LIMIT_PCT       = 0.10          # 涨跌停幅度 ±10%（封板判定容差）
+    ASHARE_LOT_SIZE        = 100           # 最小交易单位 100 股
+    ASHARE_CACHE_DIR       = os.getenv("ASHARE_CACHE_DIR", "ashare_cache")
+    ASHARE_MIN_BARS        = 250           # 个股最少交易日（约1年），不足剔除
+
     MAX_OPEN_POSITIONS = 4         # 最多同时持仓品种数
     MAX_LOT_PER_TRADE  = 5.0       # 兜底上限；实际手数由 XAUUSD 0.01 手波动预算决定
     # 永不自动交易的品种（白银合约乘数 5000，2026-07-08 起停用）

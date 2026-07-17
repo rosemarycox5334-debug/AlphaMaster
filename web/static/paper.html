@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AlphaMaster · A股虚拟炒股</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=27" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- 背景动效层（与主站一致） -->
+  <div class="bg-layers" aria-hidden="true">
+    <div class="bg-aurora"></div>
+    <div class="bg-grid"></div>
+    <div class="bg-scan"></div>
+    <div class="bg-vignette"></div>
+  </div>
+
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <div class="brand-mark" data-text="α">α<span class="brand-ring"></span></div>
+        <div>
+          <h1>A股虚拟炒股</h1>
+          <p>截面因子选股 · T+1 组合引擎 · 100 万起始</p>
+        </div>
+      </div>
+      <div class="header-meta">
+        <a class="meta-item" href="/" style="text-decoration:none">← 返回主控台</a>
+        <span class="pill" id="jobPill"><i class="pill-dot"></i><span id="jobPillText">空闲</span></span>
+      </div>
+    </header>
+
+    <!-- 启动面板 -->
+    <section class="panel launch-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <h2>启动历史回放</h2>
+      <div class="launch-form launch-form-file">
+        <div class="launch-row bt-cost-row">
+          <label class="bt-cost-field">
+            <span>训练区间起</span>
+            <input type="text" id="pStart" value="2023-01-01" />
+          </label>
+          <label class="bt-cost-field">
+            <span>数据区间止</span>
+            <input type="text" id="pEnd" value="2026-06-30" />
+          </label>
+          <label class="bt-cost-field">
+            <span>模拟起始日</span>
+            <input type="text" id="pSimStart" value="2026-06-01" />
+          </label>
+          <div class="launch-actions">
+            <button class="btn btn-primary" id="pStartBtn">开始回放</button>
+            <button class="btn btn-danger" id="pStopBtn" disabled>停止</button>
+          </div>
+        </div>
+        <small class="field-hint">
+          用 <code>strategies/best_ashare_universe.json</code> 的截面因子选股，每日 Top10 等权、T+1 成交、真实佣金印花税。
+          需先用 <code>train_ashare.py</code> 训练出策略文件。
+        </small>
+      </div>
+    </section>
+
+    <!-- 绩效概览 -->
+    <section class="panel bt-summary-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>组合绩效</h2>
+        <span class="hint" id="pMetricHint">尚未运行回放</span>
+      </div>
+      <div class="metric-grid" id="pMetricGrid">
+        <div class="metric-empty">运行回放后显示总收益、回撤、夏普、超额 alpha 等指标</div>
+      </div>
+    </section>
+
+    <!-- 净值曲线 -->
+    <section class="panel bt-charts-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>净值曲线</h2>
+        <span class="hint" id="pChartHint">回放完成后展示账户净值走势</span>
+      </div>
+      <div class="equity-chart-wrap" style="position:relative;height:320px">
+        <canvas id="pEquityChart"></canvas>
+      </div>
+    </section>
+
+    <!-- 交易流水 -->
+    <section class="panel bt-table-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>交易流水</h2>
+        <span class="hint" id="pTradeHint">—</span>
+      </div>
+      <div class="table-wrap">
+        <table class="bt-table">
+          <thead>
+            <tr>
+              <th>日期</th><th>代码</th><th>方向</th>
+              <th>价格</th><th>股数</th><th>费用</th>
+            </tr>
+          </thead>
+          <tbody id="pTradeBody">
+            <tr class="empty-row"><td colspan="6">暂无交易记录</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/paper.js?v=1"></script>
+</body>
+</html>

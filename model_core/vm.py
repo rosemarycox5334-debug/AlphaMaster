@@ -178,16 +178,10 @@ class StackVM:
             if cs_z.std() >= 0.3:
                 return torch.clamp(cs_z, -3.0, 3.0)
 
-        # ── 时序标准化（每品种独立，expanding 无 look-ahead）─────────
-        # 每个 t 仅用 x[:, :t+1] 计算 mean/std，避免用 t 之后的未来统计量
-        # 归一化当前值（原 dim=1 全局 mean/std 存在 look-ahead bias）。
-        cnt = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).view(1, T)
-        cumsum = x.cumsum(dim=1)
-        ts_mean = cumsum / cnt                          # [N,T]，t 位 = x[:,:t+1].mean()
-        cumsum_sq = (x * x).cumsum(dim=1)
-        ts_var = (cumsum_sq / cnt) - ts_mean * ts_mean  # E[x^2] - E[x]^2
-        ts_std = ts_var.clamp(min=1e-8).sqrt()
-        ts_z = (x - ts_mean) / ts_std
+        # ── 时序标准化（每品种独立）─────────────────────────────────
+        ts_mean = x.mean(dim=1, keepdim=True)
+        ts_std  = x.std(dim=1, keepdim=True).clamp(min=1e-8)
+        ts_z    = (x - ts_mean) / ts_std
 
         if ts_z.std() >= 0.1:
             return torch.clamp(ts_z, -3.0, 3.0)
