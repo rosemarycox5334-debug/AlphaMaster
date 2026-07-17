@@ -325,6 +325,7 @@ def main():
     data_file_arg = None
     commission_pct = DEFAULT_COMMISSION_PCT
     slippage_pct = DEFAULT_SLIPPAGE_PCT
+    market_arg = None
     for i, arg in enumerate(sys.argv):
         if arg == "--strategy-file" and i + 1 < len(sys.argv):
             strategy_file = sys.argv[i + 1]
@@ -334,6 +335,8 @@ def main():
             commission_pct = float(sys.argv[i + 1])
         elif arg == "--slippage" and i + 1 < len(sys.argv):
             slippage_pct = float(sys.argv[i + 1])
+        elif arg == "--market" and i + 1 < len(sys.argv):
+            market_arg = sys.argv[i + 1]
 
     if commission_pct < 0 or slippage_pct < 0:
         print("[ERROR] 手续费/滑点不能为负"); sys.exit(1)
@@ -347,12 +350,14 @@ def main():
 
     # ── 2. 加载策略 ─────────────────────────────────────────────────
     strategy_data_file = None
+    strategy_market = "generic"
     print(f"\n{'='*62}")
     if strategy_file:
         data = load_strategy(Path(strategy_file))
         if data is None:
             print(f"[ERROR] 找不到: {strategy_file}"); sys.exit(1)
         strategy_data_file = data.get("data_file")
+        strategy_market = data.get("market") or "generic"
         sym = data.get("symbol")
         if not sym:
             stem = Path(strategy_file).stem
@@ -376,6 +381,7 @@ def main():
         if data is None:
             print(f"[ERROR] 找不到: {Config.STRATEGY_FILE}"); sys.exit(1)
         strategy_data_file = data.get("data_file")
+        strategy_market = data.get("market") or "generic"
         symbol_formulas = {sym: data["formula"] for sym in Config.SYMBOLS}
         print("  模式: 单公式（所有品种共用）")
     else:
@@ -393,11 +399,20 @@ def main():
             symbol_formulas[sym] = data["formula"]
             if not strategy_data_file and data.get("data_file"):
                 strategy_data_file = data.get("data_file")
+            if data.get("market"):
+                strategy_market = data.get("market")
             sc = data.get("best_score", "N/A")
             print(f"  {sym}: score={sc:.3f}  {decode_formula(data['formula'])}")
 
     if not symbol_formulas:
         print("[ERROR] 没有有效策略，请先运行训练"); sys.exit(1)
+
+    from strategy_manager.market_rules import normalize_market
+    try:
+        market = normalize_market(market_arg or strategy_market)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}"); sys.exit(1)
+    print(f"  市场规则: {'A股（只做多/T+1/涨跌停）' if market == 'a_share' else '通用市场'}")
 
     cost_rates = {sym: cost_rate_all for sym in symbol_formulas}
     print(f"{'='*62}\n")
@@ -458,7 +473,11 @@ def main():
         feat_i    = feat[i:i+1]
         raw_i     = {k: v[i:i+1] for k, v in raw_dict.items()}
 
-        engine    = BacktestEngine(formula=formula, cost_rate=cost_rate)
+        periods_per_year = 250 if market == "a_share" and pm.timeframe == "D1" else 6240
+        engine    = BacktestEngine(
+            formula=formula, cost_rate=cost_rate,
+            periods_per_year=periods_per_year, market=market,
+        )
         sym_res   = engine.run(raw_i, feat_i, [sym])
         backtest_results.extend(sym_res)
 
@@ -535,6 +554,7 @@ def main():
     # ── 8. 保存 JSON 报告 ─────────────────────────────────────────────
     report = {
         "mode": "single" if single_mode else "multi_factor",
+        "market": market,
         "cost_rates": cost_rates,
         "symbols": {},
         "portfolio": {},

@@ -128,12 +128,23 @@ def inspect_parquet_file(path: str | Path) -> dict[str, Any]:
         )
 
     years = round(bars / 6240, 2) if timeframe == "H1" else None
+    recommended_bars = Config.RECOMMENDED_BARS
+    sample_warning = (
+        f"\u6837\u672c\u504f\u5c11\uff1a\u5f53\u524d {bars} bars\uff0c"
+        f"\u5efa\u8bae\u81f3\u5c11 {recommended_bars} bars\uff1b"
+        "\u4ecd\u53ef\u8bad\u7ec3\uff0c\u4f46\u7ed3\u679c\u7a33\u5b9a\u6027"
+        "\u53ef\u80fd\u8f83\u4f4e\u3002"
+        if bars < recommended_bars
+        else ""
+    )
     return {
         "data_file": str(p.resolve()),
         "filename": p.name,
         "symbol": symbol,
         "timeframe": timeframe,
         "bars": bars,
+        "recommended_bars": recommended_bars,
+        "sample_warning": sample_warning,
         "years_h1": years,
         "valid": True,
         "message": "",

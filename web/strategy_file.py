@@ -128,11 +128,13 @@ def inspect_strategy_file(
     timeframe = None
     data_file = None
     mode = None
+    market = "generic"
     if isinstance(data, dict):
         formula_decoded = data.get("formula_decoded") or _decode_formula(formula)
         timeframe = data.get("timeframe")
         data_file = data.get("data_file")
         mode = data.get("mode")
+        market = data.get("market") or "generic"
 
     data_file, tf_fallback = _resolve_data_file_for_symbol(
         symbol or "",
@@ -152,6 +154,7 @@ def inspect_strategy_file(
         "data_file": data_file,
         "data_file_exists": data_file_exists,
         "mode": mode,
+        "market": market,
         "best_score": best_score,
         "vocab_version": vocab_version,
         "formula_decoded": formula_decoded,

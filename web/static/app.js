@@ -1,6 +1,7 @@
 const API = "";
 let selectedDataFile = null;
 let selectedSymbol = null;
+let selectedDataBars = 0;
 let selectedStrategyFile = null;
 let selectedStrategySymbol = null;
 let chart = null;
@@ -237,6 +238,7 @@ function renderDataFileCard(info) {
     card.innerHTML = '<div class="data-file-empty">尚未选择数据文件</div>';
     selectedDataFile = null;
     selectedSymbol = null;
+    selectedDataBars = 0;
     startBtn.disabled = true;
     if ($("retrainBtn")) $("retrainBtn").disabled = true;
     if ($("exportBtn")) $("exportBtn").disabled = true;
@@ -247,6 +249,7 @@ function renderDataFileCard(info) {
 
   selectedDataFile = info.data_file;
   selectedSymbol = info.symbol || null;
+  selectedDataBars = Number(info.bars || 0);
 
   if (info.valid === false) {
     card.className = "data-file-card invalid";
@@ -269,16 +272,18 @@ function renderDataFileCard(info) {
       <div class="item"><span class="label">周期</span><span class="value">${info.timeframe}</span></div>
       <div class="item"><span class="label">K线</span><span class="value">${info.bars?.toLocaleString()}</span></div>
       <div class="item"><span class="label">数据年限</span><span class="value">${yearsText}</span></div>
-      <div class="item"><span class="label">进度</span><span class="value" id="fileProgressPct">—</span></div>
+      <div class="item"><span class="label">训练进度</span><span class="value" id="fileProgressPct">—</span></div>
       <div class="item"><span class="label">本次训练时长</span><span class="value" id="fileElapsedTime">—</span></div>
       <div class="item"><span class="label">历史训练总时长</span><span class="value" id="fileHistoryElapsedTime">—</span></div>
       <div class="item"><span class="label">最优分数</span><span class="value score-best" id="fileBestScore">—</span></div>
       <div class="item"><span class="label">验证分数</span><span class="value score-val" id="fileValScore">—</span></div>
     </div>
+    ${info.sample_warning ? `<div class="data-file-warning">${info.sample_warning}</div>` : ""}
     <div class="path" title="${info.data_file}">${info.filename || info.data_file}</div>
   `;
   startBtn.disabled = false;
   if ($("retrainBtn")) $("retrainBtn").disabled = false;
+  updateTrainingSplitPreview();
 }
 
 function updateBtStartBtn() {
@@ -386,7 +391,21 @@ function updateTrainingTimeFields(progress, training) {
 function updateFileProgress(progress) {
   const el = document.getElementById("fileProgressPct");
   if (el && progress) {
-    el.textContent = `${progress.current_step} / ${progress.train_steps} (${progress.progress_pct}%)`;
+    const currentStep = Number(progress.current_step || 0);
+    const hasTrainingResult = Boolean(
+      currentStep > 0 || progress.has_checkpoint || progress.has_strategy
+    );
+    if (!hasTrainingResult) {
+      let plannedSteps = Number(progress.train_steps || 0);
+      try {
+        plannedSteps = readTrainingConfig().train_steps;
+      } catch (_) {
+        /* Keep the server default while the input is temporarily invalid. */
+      }
+      el.textContent = `尚未开始（计划 ${plannedSteps.toLocaleString()} 步）`;
+    } else {
+      el.textContent = `${currentStep} / ${progress.train_steps} (${progress.progress_pct}%)`;
+    }
   }
   const bestEl = document.getElementById("fileBestScore");
   if (bestEl) {
@@ -942,9 +961,110 @@ async function browseDataFile() {
     if (res.cancelled) return;
     renderDataFileCard(res);
     selectedSymbol = res.symbol;
+    updateFileProgress({
+      current_step: 0,
+      train_steps: readTrainingConfig().train_steps,
+      progress_pct: 0,
+      has_checkpoint: false,
+      has_strategy: false,
+    });
     await loadSymbolChart(res.symbol);
   } catch (e) {
     $("debugView").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+async function downloadAShareData() {
+  const input = $("aShareCodeInput");
+  const button = $("aShareDownloadBtn");
+  const status = $("aShareDownloadStatus");
+  const symbol = String(input?.value || "").trim();
+  if (!/^\d{6}$/.test(symbol)) {
+    await logClientError("请输入六位 A 股代码，例如 002192");
+    return;
+  }
+  if (button) button.disabled = true;
+  if (status) {
+    status.className = "field-hint";
+    status.textContent = `正在下载 ${symbol} 的前复权日线…`;
+  }
+  try {
+    const res = await fetchJSON("/api/a-share/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol }),
+    });
+    if (!res.training_ready) {
+      if (status) {
+        status.className = "field-hint invalid";
+        status.textContent = `${res.name || symbol}：${res.bars || 0} 根，${res.message || "数据不足"}`;
+      }
+      return;
+    }
+    selectedSymbol = res.symbol;
+    renderDataFileCard(res);
+    if ($("trainMarket")) $("trainMarket").value = "a_share";
+    if (status) {
+      status.className = "field-hint valid";
+      const source = res.source === "pytdx" ? "通达信备用源（未复权）" : "东方财富（前复权）";
+      status.textContent = `${res.name || symbol}：${res.bars} 根，${res.date_start} ～ ${res.date_end}，${source}`;
+    }
+    await loadSymbolChart(res.symbol);
+  } catch (e) {
+    if (status) {
+      status.className = "field-hint invalid";
+      status.textContent = `下载失败：${e.message}`;
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function readTrainingConfig() {
+  const integer = (id, fallback) => {
+    const value = Number.parseInt($(id)?.value, 10);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const ratio = Number.parseFloat($("cfgTrainRatio")?.value || "0.8");
+  const config = {
+    train_steps: integer("cfgTrainSteps", 9000),
+    batch_size: integer("cfgBatchSize", 192),
+    max_formula_len: integer("cfgFormulaLen", 8),
+    train_ratio: Number.isFinite(ratio) ? ratio : 0.8,
+    folds: integer("cfgFolds", 3),
+    gap: integer("cfgGap", 20),
+    seed: integer("cfgSeed", 2026),
+  };
+  const checks = [
+    [config.train_steps >= 1 && config.train_steps <= 100000, "训练步数应为 1～100000"],
+    [config.batch_size >= 16 && config.batch_size <= 1024, "批量公式数应为 16～1024"],
+    [config.max_formula_len >= 2 && config.max_formula_len <= 20, "公式最大长度应为 2～20"],
+    [config.train_ratio >= 0.5 && config.train_ratio <= 0.95, "训练集比例应为 0.50～0.95"],
+    [config.folds >= 1 && config.folds <= 10, "验证折数应为 1～10"],
+    [config.gap >= 0 && config.gap <= 1000, "训练/验证间隔应为 0～1000"],
+  ];
+  const invalid = checks.find(([ok]) => !ok);
+  if (invalid) throw new Error(invalid[1]);
+  return config;
+}
+
+function updateTrainingSplitPreview() {
+  const preview = $("trainingSplitPreview");
+  if (!preview) return;
+  if (!selectedDataBars) {
+    preview.textContent = "选择数据文件后显示实际划分数量";
+    return;
+  }
+  try {
+    const cfg = readTrainingConfig();
+    const initialTrain = Math.floor(selectedDataBars * cfg.train_ratio);
+    const available = Math.max(0, selectedDataBars - initialTrain - cfg.gap);
+    const eachValidation = Math.floor(available / cfg.folds);
+    preview.className = "field-hint valid";
+    preview.textContent = `共 ${selectedDataBars.toLocaleString()} 根：首段训练 ${initialTrain.toLocaleString()} 根，间隔 ${cfg.gap} 根，${cfg.folds} 折验证每折约 ${eachValidation.toLocaleString()} 根`;
+  } catch (e) {
+    preview.className = "field-hint invalid";
+    preview.textContent = e.message;
   }
 }
 
@@ -954,10 +1074,17 @@ async function startTraining() {
     return;
   }
   try {
+    const config = readTrainingConfig();
     const res = await fetchJSON("/api/training/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data_file: selectedDataFile, from_scratch: false }),
+      body: JSON.stringify({
+        data_file: selectedDataFile,
+        from_scratch: false,
+        device: $("trainDevice")?.value || "cpu",
+        market: $("trainMarket")?.value || "generic",
+        ...config,
+      }),
     });
     selectedSymbol = res.data_file?.symbol || res.job?.symbol;
     renderDataFileCard(res.data_file);
@@ -979,10 +1106,17 @@ async function retrainFromScratch() {
   );
   if (!ok) return;
   try {
+    const config = readTrainingConfig();
     const res = await fetchJSON("/api/training/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data_file: selectedDataFile, from_scratch: true }),
+      body: JSON.stringify({
+        data_file: selectedDataFile,
+        from_scratch: true,
+        device: $("trainDevice")?.value || "cpu",
+        market: $("trainMarket")?.value || "generic",
+        ...config,
+      }),
     });
     selectedSymbol = res.data_file?.symbol || res.job?.symbol;
     renderDataFileCard(res.data_file);
@@ -1794,6 +1928,7 @@ async function startBacktest() {
         strategy_file: selectedStrategyFile,
         commission_pct: costs.commission_pct,
         slippage_pct: costs.slippage_pct,
+        market: $("btMarket")?.value || null,
       }),
     });
     if (res.strategy_file) renderStrategyFileCard(res.strategy_file);
@@ -2484,6 +2619,24 @@ async function init() {
     await logClientError("初始化失败: " + e.message);
   }
   $("browseBtn").addEventListener("click", browseDataFile);
+  if ($("aShareDownloadBtn")) $("aShareDownloadBtn").addEventListener("click", downloadAShareData);
+  if ($("aShareCodeInput")) {
+    $("aShareCodeInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") downloadAShareData();
+    });
+  }
+  ["cfgTrainSteps", "cfgBatchSize", "cfgFormulaLen", "cfgTrainRatio", "cfgFolds", "cfgGap", "cfgSeed"].forEach((id) => {
+    if ($(id)) $(id).addEventListener("input", () => {
+      updateTrainingSplitPreview();
+      if (id === "cfgTrainSteps" && selectedDataFile) {
+        const el = $("fileProgressPct");
+        const steps = Number.parseInt($(id).value, 10);
+        if (el && el.textContent.startsWith("尚未开始") && Number.isFinite(steps)) {
+          el.textContent = `尚未开始（计划 ${steps.toLocaleString()} 步）`;
+        }
+      }
+    });
+  });
   $("startBtn").addEventListener("click", startTraining);
   if ($("retrainBtn")) $("retrainBtn").addEventListener("click", retrainFromScratch);
   $("stopBtn").addEventListener("click", stopTraining);

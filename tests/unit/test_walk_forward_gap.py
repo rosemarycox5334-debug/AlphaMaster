@@ -175,3 +175,23 @@ class TestReturnStructure:
         for i, fold in enumerate(folds):
             missing = self.REQUIRED_KEYS - set(fold.keys())
             assert not missing, f"退化折 {i} 缺少键：{missing}"
+
+
+class TestCustomTrainRatio:
+    def test_single_holdout_respects_ratio_and_gap(self):
+        folds = _build_walk_forward_folds(T=1000, n_folds=1, gap=20, train_ratio=0.8)
+        assert folds == [{
+            "train_start": 0, "train_end": 800,
+            "val_start": 820, "val_end": 1000, "gap": 20,
+        }]
+
+    def test_expanding_folds_are_time_ordered(self):
+        folds = _build_walk_forward_folds(T=1000, n_folds=3, gap=10, train_ratio=0.7)
+        assert len(folds) == 3
+        assert all(f["train_end"] < f["val_start"] <= f["val_end"] for f in folds)
+        assert all(folds[i]["train_end"] < folds[i + 1]["train_end"] for i in range(2))
+
+    def test_invalid_ratio_rejected(self):
+        import pytest
+        with pytest.raises(ValueError):
+            _build_walk_forward_folds(T=100, n_folds=1, gap=0, train_ratio=1.0)

@@ -548,6 +548,44 @@ select:focus { border-color: var(--accent); }
 
 .launch-row .launch-actions { margin-left: auto; }
 
+.ashare-download-row {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(14, 20, 31, 0.45);
+}
+
+.ashare-download-row label {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.ashare-download-row input {
+  width: 130px;
+  letter-spacing: 0.08em;
+}
+
+.ashare-download-row .field-hint { margin-left: 4px; }
+
+.training-config-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  background: rgba(14, 20, 31, 0.4);
+}
+
+.training-config-panel summary { cursor: pointer; color: var(--accent); }
+
+.training-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.training-config-grid label { display: flex; flex-direction: column; gap: 5px; }
+.training-config-grid label span { color: var(--text-muted); font-size: 0.78rem; }
+
 /* 主行：选择按钮与信息卡等高并排 */
 .launch-row-main { align-items: stretch; }
 
@@ -700,6 +738,11 @@ select:focus { border-color: var(--accent); }
 }
 
 .data-file-error { color: var(--danger); font-size: 0.82rem; }
+.data-file-warning {
+  color: var(--warning, #d99a2b);
+  font-size: 0.78rem;
+  padding: 0.55rem 0.75rem 0;
+}
 
 .data-file-path {
   font-family: var(--mono);

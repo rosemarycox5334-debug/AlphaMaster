@@ -36,6 +36,15 @@ class TrainingJob:
     symbol: str
     timeframe: str
     mode: str
+    device: str = "cpu"
+    market: str = "generic"
+    train_steps: int = 9000
+    batch_size: int = 192
+    max_formula_len: int = 8
+    train_ratio: float = 0.8
+    folds: int = 3
+    gap: int = 20
+    seed: int = 2026
     state: JobState = JobState.RUNNING
     pid: int | None = None
     log_path: str = ""
@@ -50,6 +59,15 @@ class TrainingJob:
             "symbol": self.symbol,
             "timeframe": self.timeframe,
             "mode": self.mode,
+            "device": self.device,
+            "market": self.market,
+            "train_steps": self.train_steps,
+            "batch_size": self.batch_size,
+            "max_formula_len": self.max_formula_len,
+            "train_ratio": self.train_ratio,
+            "folds": self.folds,
+            "gap": self.gap,
+            "seed": self.seed,
             "state": self.state.value,
             "pid": self.pid,
             "log_path": self.log_path,
@@ -83,6 +101,15 @@ class TrainingManager:
         symbol: str,
         timeframe: str,
         mode: str = "ftmo",
+        device: str = "cpu",
+        market: str = "generic",
+        train_steps: int = 9000,
+        batch_size: int = 192,
+        max_formula_len: int = 8,
+        train_ratio: float = 0.8,
+        folds: int = 3,
+        gap: int = 20,
+        seed: int = 2026,
         *,
         from_scratch: bool = False,
     ) -> TrainingJob:
@@ -108,6 +135,17 @@ class TrainingManager:
                 "train_file.py",
                 "--data-file",
                 data_file,
+                "--device",
+                device,
+                "--market",
+                market,
+                "--train-steps", str(train_steps),
+                "--batch-size", str(batch_size),
+                "--max-formula-len", str(max_formula_len),
+                "--train-ratio", str(train_ratio),
+                "--folds", str(folds),
+                "--gap", str(gap),
+                "--seed", str(seed),
             ]
             if from_scratch:
                 cmd.append("--from-scratch")
@@ -137,6 +175,15 @@ class TrainingManager:
                 symbol=symbol,
                 timeframe=timeframe,
                 mode=mode,
+                device=device,
+                market=market,
+                train_steps=train_steps,
+                batch_size=batch_size,
+                max_formula_len=max_formula_len,
+                train_ratio=train_ratio,
+                folds=folds,
+                gap=gap,
+                seed=seed,
                 pid=self._proc.pid,
                 log_path=str(log_path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
                 started_at=datetime.now(timezone.utc).isoformat(),

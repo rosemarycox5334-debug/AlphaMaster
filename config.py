@@ -117,7 +117,8 @@ class Config:
     # 每品种拉取的历史 K 线上限。设为极大值以使用 MT5 全部可用历史；
     # 本地缓存优先：若 D:\K线数据 已有数据，fetcher 会返回本地全部历史（不截断）。
     BARS_COUNT            = 10_000_000
-    MIN_BARS              = 3000   # 低于此值的品种被排除
+    MIN_BARS              = 1000   # Hard minimum; reject files below this value.
+    RECOMMENDED_BARS      = 3000   # Allow fewer bars, but warn about sample size.
     DATA_REFRESH_INTERVAL = 300    # 秒，实盘数据刷新间隔
     KLINE_CACHE_DIR       = os.getenv("KLINE_CACHE_DIR", r"D:\K线数据")  # 本地 K 线缓存目录
 

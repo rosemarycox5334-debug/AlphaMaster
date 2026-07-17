@@ -57,7 +57,8 @@ class TestConfigSymbols:
 
 class TestConfigDataParams:
     def test_min_bars_equals_100(self):
-        assert Config.MIN_BARS == 3000   # updated for 5-symbol portfolio
+        assert Config.MIN_BARS == 1000
+        assert Config.RECOMMENDED_BARS == 3000
 
     def test_bars_count_equals_2000(self):
         assert Config.BARS_COUNT >= 100   # 只断言合理下界，不固定具体值

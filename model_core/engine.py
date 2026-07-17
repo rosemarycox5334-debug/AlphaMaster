@@ -76,7 +76,34 @@ def _fallback_data_file_for_symbol(symbol: str) -> tuple[str | None, str | None]
 # Walk-Forward 折叠构建
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_walk_forward_folds(T: int, n_folds: int = 5, gap: int = 20) -> list[dict]:
+def _build_walk_forward_folds(
+    T: int, n_folds: int = 5, gap: int = 20, train_ratio: float | None = None
+) -> list[dict]:
+    if train_ratio is not None:
+        if not 0.0 < train_ratio < 1.0:
+            raise ValueError("train_ratio 必须在 0 和 1 之间")
+        n_folds = max(1, int(n_folds))
+        train_end0 = max(2, min(T - 2, int(T * train_ratio)))
+        available = T - train_end0 - gap
+        if available < n_folds:
+            gap = max(0, T - train_end0 - n_folds)
+            available = T - train_end0 - gap
+        if available <= 0:
+            return [{"train_start": 0, "train_end": T, "val_start": 0, "val_end": T, "gap": 0}]
+        val_size = max(1, available // n_folds)
+        folds = []
+        for k in range(n_folds):
+            train_end = train_end0 + k * val_size
+            val_start = train_end + gap
+            val_end = T if k == n_folds - 1 else min(T, val_start + val_size)
+            if val_start >= T or val_end <= val_start:
+                break
+            folds.append({
+                "train_start": 0, "train_end": train_end,
+                "val_start": val_start, "val_end": val_end, "gap": gap,
+            })
+        return folds or [{"train_start": 0, "train_end": T, "val_start": 0, "val_end": T, "gap": 0}]
+
     fold_size = T // n_folds
     if fold_size < 2:
         return [{"train_start": 0, "train_end": T, "val_start": 0, "val_end": T, "gap": 0}]
@@ -207,10 +234,21 @@ class ConstrainedSampler:
 class AlphaEngine:
     def __init__(self, data_manager=None, use_lord_regularization=True,
                  lord_decay_rate=1e-3, lord_num_iterations=5, n_folds: int = 5,
-                 target_symbol: str | None = None):
+                 target_symbol: str | None = None, market: str = "generic",
+                 periods_per_year: int = 6240, train_ratio: float | None = None):
         self.data_manager  = data_manager
         self.n_folds       = n_folds
         self.target_symbol = target_symbol   # None = 多品种模式，str = 单品种模式
+        self.market = market
+        self.train_ratio = train_ratio
+        self.training_config = {
+            "train_steps": ModelConfig.TRAIN_STEPS,
+            "batch_size": ModelConfig.BATCH_SIZE,
+            "max_formula_len": ModelConfig.MAX_FORMULA_LEN,
+            "train_ratio": train_ratio,
+            "n_folds": n_folds,
+            "gap": ModelConfig.WF_GAP,
+        }
         self.model   = AlphaGPT().to(ModelConfig.DEVICE)
         self.opt     = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
 
@@ -230,7 +268,12 @@ class AlphaEngine:
             self.rank_monitor = None
 
         self.vm = StackVM()
-        self.bt = MT5Backtest()
+        raw_dict = data_manager.raw_dict if data_manager is not None else None
+        symbols = list(getattr(data_manager, "symbols", []) or []) if data_manager is not None else []
+        self.bt = MT5Backtest(
+            market=market, raw_dict=raw_dict, symbols=symbols,
+            periods_per_year=periods_per_year,
+        )
 
         from .vocab import FORMULA_VOCAB as _v
         self.sampler = ConstrainedSampler(
@@ -453,8 +496,10 @@ class AlphaEngine:
                   f"噪声={ModelConfig.RESTART_NOISE}")
 
         T     = self.data_manager.target_ret.shape[1]
-        folds = _build_walk_forward_folds(T, self.n_folds,
-                                          gap=getattr(ModelConfig, 'WF_GAP', 20))
+        folds = _build_walk_forward_folds(
+            T, self.n_folds, gap=getattr(ModelConfig, 'WF_GAP', 20),
+            train_ratio=self.train_ratio,
+        )
         use_wf = len(folds) > 1 and not (
             folds[0]["train_start"] == 0 and folds[0]["train_end"] == T
         )
@@ -677,7 +722,7 @@ class AlphaEngine:
                         pass
                     else:
                         # P3：冠军选择稳健性校验——连续仓位均值 < 5% 的极稀疏公式拒绝登顶
-                        pos_check = compute_target_positions_stateless(res)
+                        pos_check = self.bt._positions(res)
                         exposure = pos_check.abs().mean().item()  # 连续仓位：均值
                         if exposure < 0.05:
                             # 极稀疏：参与梯度更新但不登顶，但记录日志方便排查
@@ -835,6 +880,8 @@ class AlphaEngine:
                     "symbol": self.target_symbol,
                     "formula": self.best_formula,
                     "best_score": self.best_score,
+                    "market": self.market,
+                    "training_config": self.training_config,
                 }
                 save_path = _strategy_file_for_symbol(self.target_symbol)
                 pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -955,6 +1002,8 @@ class AlphaEngine:
                     "symbol": self.target_symbol,
                     "formula": self.best_formula,
                     "best_score": self.best_score,
+                    "market": self.market,
+                    "training_config": self.training_config,
                 }
                 save_path = _strategy_file_for_symbol(self.target_symbol)
                 pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1025,9 +1074,11 @@ class AlphaEngine:
                 "formula": self.best_formula,
                 "best_score": self.best_score,
                 "formula_decoded": self._decode_formula(self.best_formula),
+                "market": self.market,
+                "training_config": self.training_config,
             }
             # 保留训练数据路径等元数据，避免 live 保存把 data_file 冲掉
-            for key in ("timeframe", "data_file", "mode", "train_steps"):
+            for key in ("timeframe", "data_file", "mode", "train_steps", "market"):
                 val = getattr(self, key, None)
                 if val is None:
                     val = existing.get(key)
@@ -1071,6 +1122,8 @@ class AlphaEngine:
                 k: v for k, v in self.training_history.items()
                 if k != '_low_entropy_streak'
             },
+            "market":               self.market,
+            "training_config":      self.training_config,
         }
         torch.save(ckpt, path)
         return path
@@ -1089,6 +1142,12 @@ class AlphaEngine:
             )
         # verify() 版本不匹配时抛 VocabVersionMismatchError，拒绝加载
         FORMULA_VOCAB.verify(artifact_version)
+        artifact_market = ckpt.get("market", "generic")
+        if artifact_market != self.market:
+            raise RuntimeError(
+                f"checkpoint 市场={artifact_market}，当前市场={self.market}；"
+                "市场规则不同，请使用 --from-scratch 重新训练"
+            )
         # ── 版本校验通过，继续加载 ────────────────────────────────────────
 
         self.model.load_state_dict(ckpt["model_state_dict"])

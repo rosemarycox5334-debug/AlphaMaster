@@ -52,6 +52,7 @@ class BacktestJob:
     symbol: str
     commission_pct: float = 0.02
     slippage_pct: float = 0.01
+    market: str = "generic"
     state: JobState = JobState.RUNNING
     pid: int | None = None
     log_path: str = ""
@@ -66,6 +67,7 @@ class BacktestJob:
             "symbol": self.symbol,
             "commission_pct": self.commission_pct,
             "slippage_pct": self.slippage_pct,
+            "market": self.market,
             "state": self.state.value,
             "pid": self.pid,
             "log_path": self.log_path,
@@ -104,6 +106,7 @@ class BacktestManager:
         data_file: str | None = None,
         commission_pct: float = 0.02,
         slippage_pct: float = 0.01,
+        market: str = "generic",
     ) -> BacktestJob:
         with self._lock:
             self._refresh_state()
@@ -128,6 +131,8 @@ class BacktestManager:
                 str(commission_pct),
                 "--slippage",
                 str(slippage_pct),
+                "--market",
+                market,
             ]
             if not data_file:
                 raise RuntimeError(
@@ -160,6 +165,7 @@ class BacktestManager:
                 symbol=symbol,
                 commission_pct=float(commission_pct),
                 slippage_pct=float(slippage_pct),
+                market=market,
                 pid=self._proc.pid,
                 log_path=str(log_path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
                 started_at=datetime.now(timezone.utc).isoformat(),

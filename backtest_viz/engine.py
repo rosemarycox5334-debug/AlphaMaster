@@ -15,6 +15,7 @@ import torch
 
 from model_core.vm import StackVM
 from strategy_manager.signal import target_to_direction
+from strategy_manager.market_rules import apply_market_constraints, normalize_market
 
 _H1_PERIODS_PER_YEAR = 6240
 
@@ -72,10 +73,12 @@ class BacktestEngine:
         formula:         list[int],
         cost_rate:       float = 0.0001,
         periods_per_year:int   = _H1_PERIODS_PER_YEAR,
+        market:          str   = "generic",
     ):
         self.formula          = formula
         self.cost_rate        = cost_rate
         self.periods_per_year = periods_per_year
+        self.market           = normalize_market(market)
         self.vm               = StackVM()
 
     # ─────────────────────────────────────────────────────────────────────
@@ -127,7 +130,6 @@ class BacktestEngine:
         factor_np   = factor_1d.detach().float().numpy()
         # 连续仓位模式：tanh 直接作为仓位比例，与训练 backtest.py 完全一致
         signal_np   = np.tanh(factor_np)
-        position_np = signal_np
 
         open_np   = raw_dict["open"].float().numpy()
         high_np   = raw_dict["high"].float().numpy()
@@ -139,6 +141,15 @@ class BacktestEngine:
             times_np = raw_dict["time"].long().numpy()
         else:
             times_np = np.arange(T, dtype=np.int64)
+
+        desired = torch.from_numpy(signal_np).unsqueeze(0)
+        constrained = apply_market_constraints(
+            desired,
+            {k: v.unsqueeze(0) for k, v in raw_dict.items()},
+            market=self.market,
+            symbols=[symbol],
+        )
+        position_np = constrained[0].numpy()
 
         # ── 计算 PnL 序列（与 backtest.py 完全一致）─────────────────
         # target_ret[t] = log(open[t+2] / open[t+1])
