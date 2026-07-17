@@ -202,7 +202,7 @@ def resolve_provider(provider: str, api_key: str | None = None) -> ResolvedProvi
 
     if pid == "deepseek":
         if not key:
-            raise ValueError("请填写 DeepSeek API Key（或在 Key 中输入 openclaw / openclaw_wb）")
+            raise ValueError("请填写 DeepSeek API Key")
         return ResolvedProvider(
             provider="deepseek",
             model=DEEPSEEK_MODEL,
@@ -471,15 +471,14 @@ def _read_workbuddy_auth_token(path: Path) -> str | None:
 def _workbuddy_token_missing_message() -> str:
     expected = _WORKBUDDY_AUTH_EXPECTED
     lines = [
-        "未检测到 WorkBuddy token。",
-        "输入 openclaw_wb 时会自动从本地登录会话读取，请确认：",
+        "未检测到 WorkBuddy token，请确认：",
         "1. 已打开 WorkBuddy 并完成登录",
         f"2. 存在会话文件：{expected}",
         f"3. 或写入 token 文件：{_WORKBUDDY_TOKEN_FILE}",
         "4. 或设置环境变量 WORKBUDDY_API_TOKEN",
     ]
     if detect_qclaw(require_alive=False):
-        lines.append("若要用本地 QClaw，请在 Key 中输入 openclaw（并先启动 QClaw）。")
+        lines.append("若要用本地 QClaw，请先启动 QClaw。")
     return "\n".join(lines)
 
 

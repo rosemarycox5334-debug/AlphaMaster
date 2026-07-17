@@ -808,7 +808,7 @@ async function runAiAnalyze() {
 
   if (resolved.provider === "deepseek" && !resolved.apiKey) {
     view.className = "ai-answer error";
-    view.textContent = "请填写 DeepSeek API Key，或在 Key 中输入 openclaw / openclaw_wb";
+    view.textContent = "请填写 DeepSeek API Key";
     return;
   }
 
