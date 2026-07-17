@@ -14,7 +14,7 @@ from tqdm import tqdm
 from .config import ModelConfig
 from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import StackVM
-from .backtest import MT5Backtest
+from .backtest import MT5Backtest, estimate_periods_per_year
 from .vocab import FORMULA_VOCAB, VOCAB_VERSION, VocabVersionMismatchError  # task 12.2
 
 # P3：冠军在场时间稳健性校验所需
@@ -471,6 +471,22 @@ class AlphaEngine:
         # 每个 t 的归一化参数只用 [t-w+1..t]，walk-forward 折叠切片无泄露
         feat  = self.data_manager.feat_tensor.to(ModelConfig.DEVICE)
         t_ret = self.data_manager.target_ret.to(ModelConfig.DEVICE)
+
+        # 数据驱动年化因子：按训练数据的实际时间戳估计每年 bar 数，
+        # 替代 MT5Backtest 默认的 H1=6240。A 股日线/15min、加密日线等
+        # 非 H1 周期不再被按 H1 年化（否则 Sharpe/年化收益被放大数倍）。
+        _dm_raw = getattr(self.data_manager, "raw_dict", None) or {}
+        _dm_time = _dm_raw.get("time", None)
+        if _dm_time is not None:
+            try:
+                _ppy = estimate_periods_per_year(_dm_time)
+                if _ppy != self.bt.periods_per_year:
+                    if verbose_header:
+                        print(f"   年化因子: {_ppy} bar/年（按数据周期自动估计）")
+                    self.bt.periods_per_year = _ppy
+            except Exception:
+                pass  # 估计失败则保留默认 6240
+
         bs      = ModelConfig.BATCH_SIZE
         n_elite = max(1, int(bs * ModelConfig.ELITE_REPLAY_FRAC))
         n_new   = bs - n_elite

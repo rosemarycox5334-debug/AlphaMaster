@@ -27,6 +27,53 @@ from .config import ModelConfig
 _H1_PERIODS_PER_YEAR = 6240
 _SORTINO_CLIP        = 20.0
 
+_SECONDS_PER_YEAR = 365.25 * 86400.0
+
+
+def estimate_periods_per_year(times) -> int:
+    """从时间戳序列估计「每年 bar 数」（年化因子）。
+
+    用 T / years_span，years_span = (t_last - t_first) / SECONDS_PER_YEAR。
+    该方法自动适应不同市场（A 股 / 外汇 / 加密）与周期——因为数据里只包含
+    交易时段的 bar，跨日历年的 bar 密度天然反映了该市场的交易频率，
+    无需按周期/市场写死。
+
+    替代了原先全局写死 _H1_PERIODS_PER_YEAR=6240（仅外汇 H1 正确）的做法：
+    A 股日线（~244 bar/年）、A 股 15min（~3904 bar/年）、加密日线（365 bar/年）
+    都会被正确年化，不再被按 H1 放大/缩小。
+
+    Args:
+        times: [N, T] 或 [T] 的 Unix 秒时间戳（torch.Tensor 或 np.ndarray）。
+
+    Returns:
+        int，每年 bar 数；数据不足时回退到 _H1_PERIODS_PER_YEAR。
+    """
+    import numpy as _np
+    if hasattr(times, "detach"):
+        arr = times.detach().cpu().numpy()
+    else:
+        arr = _np.asarray(times)
+    arr = arr.astype(_np.float64)
+    if arr.ndim == 2:
+        t_count = arr.shape[1]
+        row = arr[0]
+    elif arr.ndim == 1:
+        t_count = arr.shape[0]
+        row = arr
+    else:
+        return _H1_PERIODS_PER_YEAR
+    if t_count < 2:
+        return _H1_PERIODS_PER_YEAR
+    span = float(row[-1] - row[0])
+    if span <= 0:
+        return _H1_PERIODS_PER_YEAR
+    years = span / _SECONDS_PER_YEAR
+    if years <= 0:
+        return _H1_PERIODS_PER_YEAR
+    ppy = t_count / years
+    # 合理范围钳制，防止异常时间戳产生极端值
+    return int(max(10, min(600000, round(ppy))))
+
 
 class MT5Backtest:
     """MT5 组合级回测评估器。"""

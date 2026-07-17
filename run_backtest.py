@@ -27,6 +27,7 @@ from backtest_viz import BacktestEngine
 from model_core.vocab import FORMULA_VOCAB, VOCAB_VERSION
 from model_core.vm import StackVM
 from model_core.features import MT5FeatureEngineer
+from model_core.backtest import estimate_periods_per_year
 from strategy_manager.signal import compute_target_positions_stateless
 
 _H1_PER_YEAR = 6240
@@ -129,13 +130,15 @@ def _setup_chinese_font() -> None:
     plt.rcParams["axes.unicode_minus"] = False
 
 
-def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray | None = None):
+def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray | None = None,
+                       periods_per_year: int = _H1_PER_YEAR):
     """绘制各品种 + 等权组合的资金曲线（中文标注）。
 
     Args:
         results_map: {symbol: {"pnl": np.array, "cum_pnl": np.array, ...}}
         output_dir:  输出目录
         times_arr:   时间戳数组（Unix秒），用于 X 轴刻度
+        periods_per_year: 年化因子（每年 bar 数），由调用方按数据周期估计
     """
     _setup_chinese_font()
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -174,7 +177,7 @@ def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray
             )
         ax_eq.plot(
             x, port_cum, linewidth=2.2, color="black",
-            label=f"等权组合（索提诺 {calc_sortino(port_pnl):+.2f}）",
+            label=f"等权组合（索提诺 {calc_sortino(port_pnl, periods_per_year):+.2f}）",
         )
         ax_eq.fill_between(x, port_cum, 0, where=port_cum >= 0, alpha=0.06, color="#1565c0")
         ax_eq.fill_between(x, port_cum, 0, where=port_cum < 0,  alpha=0.06, color="#b71c1c")
@@ -188,8 +191,8 @@ def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray
     ax_eq.set_title(
         f"{title_head}  |  "
         f"总收益={show_cum[-1]:+.3f}  "
-        f"夏普={calc_sharpe(show_pnl):+.2f}  "
-        f"索提诺={calc_sortino(show_pnl):+.2f}  "
+        f"夏普={calc_sharpe(show_pnl, periods_per_year):+.2f}  "
+        f"索提诺={calc_sortino(show_pnl, periods_per_year):+.2f}  "
         f"盈亏比={_fmt_pl_ratio(results_map)}",
         fontsize=11, pad=8,
     )
@@ -220,6 +223,7 @@ def export_equity_json(
     times_arr: np.ndarray | None = None,
     max_points: int = 1500,
     rolling_window: int = 500,
+    periods_per_year: int = _H1_PER_YEAR,
 ):
     """导出资金曲线原始数据为 JSON，供前端渲染交互式 HTML 图表。
 
@@ -277,7 +281,8 @@ def export_equity_json(
     }
     for s in syms:
         cum = results_map[s]["cum_pnl"]
-        roll = calc_rolling_sharpe(results_map[s]["pnl"], window=rolling_window)
+        roll = calc_rolling_sharpe(results_map[s]["pnl"], window=rolling_window,
+                                   periods_per_year=periods_per_year)
         pl = results_map[s].get("profit_loss_ratio")
         out["symbols"][s] = {
             "equity": _sample(cum),
@@ -297,9 +302,10 @@ def export_equity_json(
         port_pl = float(sum(pl_vals) / len(pl_vals)) if pl_vals else None
         out["portfolio"] = {
             "equity": _sample(port_cum),
-            "rolling_sharpe": _sample(calc_rolling_sharpe(port_pnl, window=rolling_window)),
-            "sharpe": round(float(calc_sharpe(port_pnl)), 4),
-            "sortino": round(float(calc_sortino(port_pnl)), 4),
+            "rolling_sharpe": _sample(calc_rolling_sharpe(port_pnl, window=rolling_window,
+                                                         periods_per_year=periods_per_year)),
+            "sharpe": round(float(calc_sharpe(port_pnl, periods_per_year)), 4),
+            "sortino": round(float(calc_sortino(port_pnl, periods_per_year)), 4),
             "total_return": round(float(port_cum[-1]), 6),
             "profit_loss_ratio": round(port_pl, 4) if port_pl is not None else None,
         }
@@ -437,7 +443,10 @@ def main():
 
     T = raw_dict["open"].shape[1]
     times_all = raw_dict.get("time", None)
-    print(f"  品种: {syms}  T={T} bars\n")
+    # 数据驱动年化因子：按实际时间戳估计每年 bar 数，替代写死的 H1=6240。
+    # A 股日线(~244)、A 股 15min(~3904)、外汇 H1(6240)、加密日线(365) 都会被正确年化。
+    ppy = estimate_periods_per_year(times_all) if times_all is not None else _H1_PER_YEAR
+    print(f"  品种: {syms}  T={T} bars  年化因子={ppy} bar/年\n")
 
     # ── 4. 为每品种计算因子 + 回测 ───────────────────────────────
     vm   = StackVM()
@@ -458,15 +467,16 @@ def main():
         feat_i    = feat[i:i+1]
         raw_i     = {k: v[i:i+1] for k, v in raw_dict.items()}
 
-        engine    = BacktestEngine(formula=formula, cost_rate=cost_rate)
+        engine    = BacktestEngine(formula=formula, cost_rate=cost_rate,
+                                   periods_per_year=ppy)
         sym_res   = engine.run(raw_i, feat_i, [sym])
         backtest_results.extend(sym_res)
 
         r = sym_res[0]
         pnl_arr = r.pnl
         cum_arr = r.cum_pnl
-        sharpe  = calc_sharpe(pnl_arr)
-        sortino = calc_sortino(pnl_arr)
+        sharpe  = calc_sharpe(pnl_arr, ppy)
+        sortino = calc_sortino(pnl_arr, ppy)
         pl_ratio = r.profit_loss_ratio
 
         results_map[sym] = {
@@ -507,8 +517,8 @@ def main():
         all_pnls = np.stack([d["pnl"] for d in results_map.values()], axis=0)
         port_pnl = all_pnls.mean(axis=0)
         port_cum = np.cumsum(port_pnl)
-        p_sharpe  = calc_sharpe(port_pnl)
-        p_sortino = calc_sortino(port_pnl)
+        p_sharpe  = calc_sharpe(port_pnl, ppy)
+        p_sortino = calc_sortino(port_pnl, ppy)
         pl_vals = [d["profit_loss_ratio"] for d in results_map.values()
                    if d["profit_loss_ratio"] is not None]
         p_pl_ratio = float(sum(pl_vals) / len(pl_vals)) if pl_vals else None
@@ -527,8 +537,8 @@ def main():
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     if results_map:
         times_np = times_all[0].numpy() if times_all is not None else None
-        plot_equity_curves(results_map, OUTPUT_DIR, times_np)
-        export_equity_json(results_map, OUTPUT_DIR, times_np)
+        plot_equity_curves(results_map, OUTPUT_DIR, times_np, periods_per_year=ppy)
+        export_equity_json(results_map, OUTPUT_DIR, times_np, periods_per_year=ppy)
 
     # ── 7. 资金曲线图已在步骤 6 生成；跳过 K 线/逐笔交易图以加快回测 ─────
 

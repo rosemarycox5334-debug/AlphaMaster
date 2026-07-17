@@ -41,9 +41,18 @@ def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch
     return mask * x + (1.0 - mask) * y
 
 def _op_jump(x: torch.Tensor) -> torch.Tensor:
-    """降低稀疏度：阈值从 3σ 改为 1.5σ，让更多时间步有非零输出"""
-    mean = x.mean(dim=1, keepdim=True)
-    std = x.std(dim=1, keepdim=True) + 1e-6
+    """降低稀疏度：阈值从 3σ 改为 1.5σ，让更多时间步有非零输出。
+
+    因果 expanding zscore：每个 t 仅用 x[:, :t+1] 计算 mean/std，
+    避免原 dim=1 全局聚合（含未来统计量）引入的 look-ahead bias。
+    """
+    N, T = x.shape
+    cnt = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).view(1, T)
+    cumsum = x.cumsum(dim=1)
+    mean = cumsum / cnt                       # [N,T]，t 位 = x[:,:t+1].mean()
+    cumsum_sq = (x * x).cumsum(dim=1)
+    var = (cumsum_sq / cnt) - mean * mean     # E[x^2] - E[x]^2
+    std = var.clamp(min=1e-12).sqrt() + 1e-6
     z = (x - mean) / std
     return torch.tanh(z - 1.5)   # tanh 软化，不再产生全零区间
 
