@@ -1942,6 +1942,8 @@ async function initRealtimeOnce() {
       sel.innerHTML = rtSources
         .map((s) => `<option value="${s.id}">${escHtml(s.label)}${s.available ? "" : " · 未就绪"}</option>`)
         .join("");
+      // 默认选第一个可用数据源
+      if (rtSources.length) sel.value = rtSources[0].id;
     }
     if (data.min_exposure != null && $("rtThresholdHint")) {
       $("rtThresholdHint").textContent = `无信号阈值 |tanh(因子)| < ${data.min_exposure}`;

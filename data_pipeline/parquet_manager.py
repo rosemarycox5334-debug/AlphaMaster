@@ -127,7 +127,20 @@ def inspect_parquet_file(path: str | Path) -> dict[str, Any]:
             f"数据不足: {bars} bars（至少需要 {Config.MIN_BARS}）"
         )
 
-    years = round(bars / 6240, 2) if timeframe == "H1" else None
+    # 从实际时间跨度计算年数（适用于所有周期，比固定公式更准确）
+    years = None
+    if "time" in df.columns and len(df) > 1:
+        try:
+            t_min = float(df["time"].min())
+            t_max = float(df["time"].max())
+            if t_max > t_min and t_max > 1_000_000_000:  # 合法的 Unix 时间戳
+                span_seconds = t_max - t_min
+                years = round(span_seconds / (365.25 * 24 * 3600), 2)
+        except Exception:
+            pass
+    # 回退：H1 用固定公式（6240 根/年，24h 市场）
+    if years is None and timeframe == "H1":
+        years = round(bars / 6240, 2)
     return {
         "data_file": str(p.resolve()),
         "filename": p.name,

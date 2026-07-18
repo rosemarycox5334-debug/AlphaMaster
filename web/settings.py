@@ -24,8 +24,8 @@ _DEFAULT = {
     "feishu_webhook_url": "",
     "feishu_secret": "",
     # tqsdk 天勤量化账号（国内期货实时数据源）
-    "tqsdk_user": "",
-    "tqsdk_password": "",
+    "tqsdk_user": "七斗居士",
+    "tqsdk_password": "ghhkphs8",
 }
 
 

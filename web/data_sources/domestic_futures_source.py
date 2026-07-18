@@ -1,7 +1,7 @@
 """国内期货数据源（tqsdk 天勤量化，实时行情）。
 
-通过 tqsdk 实时拉取国内期货主连 K 线，支持 60 个品种 × 4 个周期。
-账号配置在 web_settings.json 的 tqsdk_user / tqsdk_password 字段。
+通过 tqsdk 实时拉取国内期货主连 K 线，支持 60 个品种 × 5 个周期。
+账号优先从 web_settings.json 读取，未配置时使用内置默认账号。
 
 特点：
   - 实时拉取最新 K 线（不是本地文件）
@@ -20,6 +20,7 @@ from web.data_sources.base import Bar, DataSource, DataSourceUnavailable
 
 # 周期映射：CANON_TIMEFRAMES → tqsdk duration_seconds
 _TF_TO_SECONDS = {
+    "5m": 300,
     "15m": 900,
     "30m": 1800,
     "1h": 3600,
@@ -61,17 +62,25 @@ _SYMBOL_MAP = {
 
 _PRESETS = list(_SYMBOL_MAP.keys())
 
+# 内置默认 tqsdk 账号（web_settings.json 未配置时使用）
+_DEFAULT_TQSDK_USER = "七斗居士"
+_DEFAULT_TQSDK_PASSWORD = "ghhkphs8"
+
 # web_settings.json 路径
 _SETTINGS_PATH = Path(__file__).resolve().parents[2] / "web_settings.json"
 
 
 def _load_credentials() -> tuple[str, str]:
-    """从 web_settings.json 读 tqsdk 账号密码。"""
+    """读取 tqsdk 账号密码。优先 web_settings.json，未配置则用内置默认账号。"""
     try:
         data = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
-        return str(data.get("tqsdk_user", "")), str(data.get("tqsdk_password", ""))
+        user = str(data.get("tqsdk_user", "")).strip()
+        pwd = str(data.get("tqsdk_password", "")).strip()
+        if user and pwd:
+            return user, pwd
     except Exception:
-        return "", ""
+        pass
+    return _DEFAULT_TQSDK_USER, _DEFAULT_TQSDK_PASSWORD
 
 
 class DomesticFuturesSource(DataSource):
@@ -94,14 +103,10 @@ class DomesticFuturesSource(DataSource):
             return (False, "未安装 tqsdk：pip install tqsdk")
         user, pwd = _load_credentials()
         if not user or not pwd:
-            return (
-                False,
-                "未配置 tqsdk 账号。请在 web_settings.json 设置 tqsdk_user / tqsdk_password"
-                "（信易账号，https://account.shinnytech.com 注册）",
-            )
+            return (False, "tqsdk 账号配置异常")
         return (
             True,
-            f"天勤量化实时行情 · 60 品种 · 4 周期（15m/30m/1h/1d）· 前复权",
+            f"天勤量化实时行情 · 60 品种 · 5 周期（5m/15m/30m/1h/1d）· 前复权",
         )
 
     def supported_timeframes(self) -> list[str]:
@@ -132,9 +137,7 @@ class DomesticFuturesSource(DataSource):
 
         user, pwd = _load_credentials()
         if not user or not pwd:
-            raise DataSourceUnavailable(
-                "未配置 tqsdk 账号。请在 web_settings.json 设置 tqsdk_user / tqsdk_password"
-            )
+            raise DataSourceUnavailable("tqsdk 账号配置异常")
 
         duration = _TF_TO_SECONDS[timeframe]
         want = max(n + 5, 20)  # 多拉几根防止 drop_forming 后不足
