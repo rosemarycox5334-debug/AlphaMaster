@@ -141,6 +141,27 @@
       </section>
     </div>
 
+    <section class="panel ai-panel" id="aiPanelSection">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>AI 分析当前训练情况</h2>
+        <span class="hint" id="aiProviderHint">DeepSeek · deepseek-v4-flash</span>
+      </div>
+      <div class="ai-form">
+        <div class="ai-row">
+          <label class="ai-field ai-key-field" id="aiKeyField">
+            <span>API Key</span>
+            <input type="password" id="aiApiKeyInput" placeholder="填入 DeepSeek API Key" autocomplete="off" />
+          </label>
+          <button type="button" class="btn btn-primary" id="aiAnalyzeBtn">开始分析</button>
+          <button type="button" class="btn btn-unlimited" id="aiUnlimitedBtn">获取无限分析功能</button>
+        </div>
+        <small class="field-hint" id="aiChannelHint">使用 DeepSeek（deepseek-v4-flash · https://api.deepseek.com），填入你的 API Key 即可。</small>
+      </div>
+      <div class="ai-answer" id="aiAnswerView">点击「开始分析」后，AI 将回答：当前训练情况怎么样，是否值得继续，以及最新因子的含义与原理。</div>
+    </section>
+
     <section class="panel howto-panel">
       <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
       <span class="hud-corner bl"></span><span class="hud-corner br"></span>
@@ -208,27 +229,6 @@
         <span class="hint" id="debugLogPaths">—</span>
       </div>
       <pre class="debug-view" id="debugView">暂无报错</pre>
-    </section>
-
-    <section class="panel ai-panel" id="aiPanelSection">
-      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
-      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
-      <div class="panel-head">
-        <h2>AI 分析当前训练情况</h2>
-        <span class="hint" id="aiProviderHint">DeepSeek · deepseek-v4-flash</span>
-      </div>
-      <div class="ai-form">
-        <div class="ai-row">
-          <label class="ai-field ai-key-field" id="aiKeyField">
-            <span>API Key</span>
-            <input type="password" id="aiApiKeyInput" placeholder="填入 DeepSeek API Key" autocomplete="off" />
-          </label>
-          <button type="button" class="btn btn-primary" id="aiAnalyzeBtn">开始分析</button>
-          <button type="button" class="btn btn-unlimited" id="aiUnlimitedBtn">获取无限分析功能</button>
-        </div>
-        <small class="field-hint" id="aiChannelHint">使用 DeepSeek（deepseek-v4-flash · https://api.deepseek.com），填入你的 API Key 即可。</small>
-      </div>
-      <div class="ai-answer" id="aiAnswerView">点击「开始分析」后，AI 将回答：当前训练情况怎么样，是否值得继续，以及最新因子的含义与原理。</div>
     </section>
 
     <div class="modal" id="aiUnlimitedModal" hidden>
