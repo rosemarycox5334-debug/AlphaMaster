@@ -274,6 +274,152 @@ class AlphaEngine:
         self._reward_ema: float | None = None
         self._reward_ema_step: int = 0
 
+        # ── 并行评估线程池（CPU 利用率优化）──────────────────────────────
+        self._eval_pool = None
+        self._eval_workers = 1
+        if ModelConfig.PARALLEL_EVAL:
+            self._init_parallel_eval()
+
+    # ── 并行评估初始化 ──────────────────────────────────────────────────────
+
+    def _init_parallel_eval(self):
+        """初始化 ThreadPoolExecutor 用于并行公式评估。
+
+        PyTorch CPU 算子会释放 GIL，多个 worker 线程可以真正并行执行
+        vm.execute / bt.evaluate_fold 等纯张量计算。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        import os
+
+        phys = os.cpu_count() or 4
+        workers = ModelConfig.EVAL_WORKERS
+        if workers <= 0:
+            workers = min(phys, 8)
+        intra = ModelConfig.EVAL_INTRA_THREADS
+        if intra <= 0:
+            intra = phys
+        try:
+            torch.set_num_threads(intra)
+        except RuntimeError:
+            pass
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
+
+        self._eval_workers = workers
+        self._eval_pool = ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="alpha-eval",
+        )
+        print(f"[ParallelEval] workers={workers} intra_threads={intra} "
+              f"(physical_cores={phys})  pool={'ON' if workers > 1 else 'OFF'}",
+              flush=True)
+
+    # ── 单条公式评估任务（线程安全）───────────────────────────────────────
+
+    def _eval_formula_task(
+        self,
+        idx: int,
+        fml: list[int],
+        feat: torch.Tensor,
+        t_ret: torch.Tensor,
+        folds: list[dict],
+        use_wf: bool,
+        factor_pool_snapshot: list,
+    ) -> dict:
+        """评估单条公式（线程安全，可被多个 worker 并发调用）。
+
+        所有共享对象（self.vm, self.bt）在评估路径上都是只读的；
+        factor_pool 通过 snapshot 传入只读快照。
+        """
+        try:
+            with torch.no_grad():
+                res = self.vm.execute(fml, feat)
+
+            if res is None:
+                return {'idx': idx, 'status': 'none', 'reward': -5.0,
+                        'val_score': -5.0, 'fml': fml}
+            if res.std() < 1e-4:
+                return {'idx': idx, 'status': 'const', 'reward': -2.0,
+                        'val_score': -2.0, 'fml': fml}
+
+            with torch.no_grad():
+                if use_wf:
+                    fold_tr, fold_vl, fold_ic = [], [], []
+                    for fold in folds:
+                        tr_sc, vl_sc = self.bt.evaluate_fold(
+                            res, t_ret,
+                            fold["train_start"], fold["train_end"],
+                            fold["val_start"],   fold["val_end"],
+                        )
+                        ic_m, _ = AlphaEngine._compute_ic(
+                            res[:, fold["train_start"]:fold["train_end"]],
+                            t_ret[:, fold["train_start"]:fold["train_end"]],
+                        )
+                        tr_adj = AlphaEngine._apply_ic_gate(tr_sc, ic_m)
+                        fold_tr.append(ModelConfig.REWARD_ALPHA * tr_adj)
+                        ic_v, _ = AlphaEngine._compute_ic(
+                            res[:, fold["val_start"]:fold["val_end"]],
+                            t_ret[:, fold["val_start"]:fold["val_end"]],
+                        )
+                        vl_adj = AlphaEngine._apply_ic_gate(vl_sc, ic_v)
+                        fold_vl.append(vl_adj)
+                        fold_ic.append(ic_m.item())
+                    train_score = torch.stack(fold_tr).mean()
+                    val_score = torch.stack(fold_vl).mean()
+                    ic_i = sum(fold_ic) / len(fold_ic)
+                else:
+                    T_total = res.shape[1]
+                    split_pt = max(int(T_total * 0.8), T_total - 100)
+                    train_score, _ = self.bt.evaluate(res, {}, t_ret)
+                    ic_m0, _ = AlphaEngine._compute_ic(res, t_ret)
+                    train_score = AlphaEngine._apply_ic_gate(
+                        ModelConfig.REWARD_ALPHA * train_score, ic_m0
+                    )
+                    if split_pt < T_total - 1:
+                        vl_sc, _ = self.bt.evaluate_fold(
+                            res, t_ret, 0, split_pt, split_pt, T_total,
+                        )
+                        ic_v0, _ = AlphaEngine._compute_ic(
+                            res[:, split_pt:], t_ret[:, split_pt:],
+                        )
+                        val_score = AlphaEngine._apply_ic_gate(vl_sc, ic_v0)
+                    else:
+                        val_score = train_score
+                    ic_i = ic_m0.item()
+                ic_full, ic_stab_full = AlphaEngine._compute_ic(res, t_ret)
+
+            # 惩罚（纯函数，线程安全）
+            reward = train_score
+            val_score_out = val_score
+
+            # 重复惩罚
+            rp = _repetition_penalty(fml)
+            if rp > 0:
+                reward = reward - rp
+                val_score_out = val_score_out - rp
+
+            # 相关性惩罚（用 step 起始快照）
+            if use_wf:
+                _corr_slice = (folds[0]["train_start"], folds[0]["train_end"])
+            else:
+                _corr_slice = (0, max(int(res.shape[1] * 0.8), res.shape[1] - 100))
+            reward = self._apply_corr_penalty(reward, res, _corr_slice)
+            val_score_out = self._apply_corr_penalty(val_score_out, res, _corr_slice)
+
+            return {
+                'idx': idx, 'status': 'ok',
+                'reward': reward.item() if isinstance(reward, torch.Tensor) else float(reward),
+                'val_score': val_score_out.item() if isinstance(val_score_out, torch.Tensor) else float(val_score_out),
+                'ic_full': ic_full.item(), 'ic_stab': ic_stab_full.item(),
+                'ic_i': ic_i, 'res': res, 'fml': fml,
+            }
+        except Exception as e:
+            return {'idx': idx, 'status': 'error', 'reward': -5.0,
+                    'val_score': -5.0, 'fml': fml,
+                    'error': f'{type(e).__name__}: {e}'}
+
     # ── IC computation ────────────────────────────────────────────────────────
 
     @staticmethod
@@ -646,7 +792,7 @@ class AlphaEngine:
                         tk[b].item(), infected_chain_elite[b])
 
 
-            # ── Part C: Evaluate all formulas ────────────────────────
+            # ── Part C: Evaluate all formulas (并行评估) ────────────────
             all_fmls = seqs_new.tolist() + elite_formulas
             tot      = len(all_fmls)
             rewards    = torch.zeros(tot, device=ModelConfig.DEVICE)
@@ -656,101 +802,67 @@ class AlphaEngine:
             step_max_val = -float('inf');  step_best_f = None
             bic, bis, bsor = [], [], []
 
-            for i, fml in enumerate(all_fmls):
-                with torch.no_grad():
-                    res = self.vm.execute(fml, feat)
-                if res is None:
-                    rewards[i] = val_scores[i] = -5.0
-                    none_cnt += 1;  continue
-                if res.std() < 1e-4:
-                    rewards[i] = val_scores[i] = -2.0
-                    const_cnt += 1;  continue
+            # factor_pool 快照：所有 worker 看到同一份只读视图
+            factor_pool_snapshot = list(self.factor_pool)
+
+            # 并行提交所有公式评估任务
+            if self._eval_pool is not None and self._eval_workers > 1 and tot > 1:
+                from concurrent.futures import ThreadPoolExecutor
+                futures = [
+                    self._eval_pool.submit(
+                        self._eval_formula_task, i, fml, feat, t_ret,
+                        folds, use_wf, factor_pool_snapshot,
+                    )
+                    for i, fml in enumerate(all_fmls)
+                ]
+                results_by_idx: dict[int, dict] = {}
+                for fut in futures:
+                    r = fut.result()
+                    results_by_idx[r['idx']] = r
+                results = [results_by_idx[i] for i in range(tot)]
+            else:
+                # 串行回退
+                results = [
+                    self._eval_formula_task(
+                        i, fml, feat, t_ret,
+                        folds, use_wf, factor_pool_snapshot,
+                    )
+                    for i, fml in enumerate(all_fmls)
+                ]
+
+            # ── 串行后处理：写入 rewards/val_scores，更新冠军/池 ─────────
+            for r in results:
+                i = r['idx']
+                status = r.get('status', 'error')
+                rewards[i] = r['reward']
+                val_scores[i] = r['val_score']
+
+                if status == 'none':
+                    none_cnt += 1
+                    bic.append(0.0); bis.append(0.0); bsor.append(r['val_score'])
+                    continue
+                if status == 'const':
+                    const_cnt += 1
+                    bic.append(0.0); bis.append(0.0); bsor.append(r['val_score'])
+                    continue
+                if status == 'error':
+                    none_cnt += 1
+                    bic.append(0.0); bis.append(0.0); bsor.append(r['val_score'])
+                    continue
+
                 ok_cnt += 1
+                bic.append(r['ic_full']); bis.append(r['ic_stab']); bsor.append(r['val_score'])
+                fml = r['fml']
+                res = r['res']
+                ic_i = r.get('ic_i', 0.0)
+                final_val = r['val_score']
 
-                with torch.no_grad():
-                    if use_wf:
-                        fold_tr, fold_vl, fold_ic = [], [], []
-                        for fold in folds:
-                            # res[:, train_start:train_end] 是在已无泄露的因子上切片，正确
-                            tr_sc, vl_sc = self.bt.evaluate_fold(
-                                res, t_ret,
-                                fold["train_start"], fold["train_end"],
-                                fold["val_start"],   fold["val_end"],
-                            )
-                            ic_m, _ = AlphaEngine._compute_ic(
-                                res[:, fold["train_start"]:fold["train_end"]],
-                                t_ret[:, fold["train_start"]:fold["train_end"]],
-                            )
-                            tr_adj = AlphaEngine._apply_ic_gate(tr_sc, ic_m)
-                            fold_tr.append(ModelConfig.REWARD_ALPHA * tr_adj)
-                            # P1-5: IC 门控也作用于 val_score（用 val 切片 IC）
-                            # 防止 IC 强负但 val Sortino 偶然为正的因子登顶冠军
-                            ic_v, _ = AlphaEngine._compute_ic(
-                                res[:, fold["val_start"]:fold["val_end"]],
-                                t_ret[:, fold["val_start"]:fold["val_end"]],
-                            )
-                            vl_adj = AlphaEngine._apply_ic_gate(vl_sc, ic_v)
-                            fold_vl.append(vl_adj)
-                            fold_ic.append(ic_m.item())
-                        train_score = torch.stack(fold_tr).mean()
-                        val_score   = torch.stack(fold_vl).mean()
-                        ic_i        = sum(fold_ic) / len(fold_ic)
-                    else:
-                        # P1-4: 非 WF 模式也分离 train/val（后 20% 作 val_score）
-                        # 避免 val_score = train_score 导致冠军选择无 OOS 保障
-                        T_total = res.shape[1]
-                        split_pt = max(int(T_total * 0.8), T_total - 100)
-                        train_score, _ = self.bt.evaluate(res, {}, t_ret)
-                        ic_m0, _  = AlphaEngine._compute_ic(res, t_ret)
-                        train_score = AlphaEngine._apply_ic_gate(
-                            ModelConfig.REWARD_ALPHA * train_score, ic_m0
-                        )
-                        # 用后 20% 作 val_score（OOS 评估）
-                        if split_pt < T_total - 1:
-                            vl_sc, _ = self.bt.evaluate_fold(
-                                res, t_ret,
-                                0, split_pt,           # train 切片（不参与 val 评估）
-                                split_pt, T_total,     # val 切片
-                            )
-                            ic_v0, _ = AlphaEngine._compute_ic(
-                                res[:, split_pt:],
-                                t_ret[:, split_pt:],
-                            )
-                            val_score = AlphaEngine._apply_ic_gate(vl_sc, ic_v0)
-                        else:
-                            val_score = train_score
-                        ic_i = ic_m0.item()
-                    ic_full, ic_stab_full = AlphaEngine._compute_ic(res, t_ret)
-
-                rewards[i]    = train_score
-                val_scores[i] = val_score
-                bic.append(ic_full.item());  bis.append(ic_stab_full.item())
-                bsor.append(val_score.item())
-
-                # 重复惩罚和相关性惩罚同时施加到 rewards 和 val_scores
-                # 保证 best_score / elite_pool 选优时已含所有惩罚
-                # P1-6: 相关性只在 train 切片上计算，避免 val 段数据泄漏
-                if use_wf:
-                    # 多折场景：用第一折 train 切片做相关性（保守估计）
-                    _corr_slice = (folds[0]["train_start"], folds[0]["train_end"])
-                else:
-                    # 非 WF 场景：用前 80% 作 train 切片
-                    _corr_slice = (0, max(int(res.shape[1] * 0.8), res.shape[1] - 100))
-                rp = _repetition_penalty(fml)
-                if rp > 0:
-                    rewards[i]    -= rp
-                    val_scores[i] -= rp
-                rewards[i]    = self._apply_corr_penalty(rewards[i], res, _corr_slice)
-                val_scores[i] = self._apply_corr_penalty(val_scores[i], res, _corr_slice)
-
-                # 用含惩罚的 val_scores[i] 选全局最优
-                final_val = val_scores[i].item()
                 if final_val > step_max_val:
-                    step_max_val = final_val;  step_best_f = fml
+                    step_max_val = final_val; step_best_f = fml
 
                 if final_val > self.best_score:
                     # OOS 泛化门控：val_score / train_score < 0.5 说明过拟合
-                    train_val = rewards[i].item()
+                    train_val = r['reward']
                     if train_val > 0.5 and final_val < train_val * 0.5:
                         tqdm.write(
                             f"[过拟合跳过 @ 第{step}步] 验证={final_val:.3f} "
@@ -758,11 +870,9 @@ class AlphaEngine:
                         )
                         pass
                     else:
-                        # P3：冠军选择稳健性校验——连续仓位均值 < 5% 的极稀疏公式拒绝登顶
                         pos_check = compute_target_positions_stateless(res)
-                        exposure = pos_check.abs().mean().item()  # 连续仓位：均值
+                        exposure = pos_check.abs().mean().item()
                         if exposure < 0.05:
-                            # 极稀疏：参与梯度更新但不登顶，但记录日志方便排查
                             tqdm.write(
                                 f"[稀疏跳过 @ 第{step}步] 验证={final_val:.3f} "
                                 f"IC={ic_i:.4f} 暴露度={exposure:.1%} | 仓位过稀疏，不更新最优"
@@ -776,7 +886,6 @@ class AlphaEngine:
                             self._best_update_step = step
                             self._stagnation_steps = 0
                             self._update_factor_pool(final_val, res)
-                            # 即时保存：任何时刻进程退出都有最新最优公式（防终端回收丢策略）
                             self._save_strategy_live()
                             tqdm.write(
                                 f"[!] 新最优 @ 第{step}步: 验证={final_val:.3f} "

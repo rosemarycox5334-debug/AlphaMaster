@@ -152,3 +152,13 @@ class ModelConfig:
     HALF_CONSISTENCY_BONUS:   bool  = True             # 前后一致性奖惩
     BETA_NEUTRAL_THRESH:      float = 0.85             # 超过此比例同方向触发重罚
     BETA_NEUTRAL_LIGHT_THRESH: float = 0.70            # 轻度失衡阈值
+
+    # ── 并行评估（CPU 利用率优化）────────────────────────────────────────
+    # 将 Part C 公式评估（VM 执行 + WF 折叠评估 + IC + 惩罚）并行化到
+    # ThreadPoolExecutor（PyTorch CPU 算子释放 GIL，多线程真正并行）。
+    # workers × intra_threads ≈ 物理核数，避免超线程过度订阅。
+    #   EVAL_WORKERS=0: 自动 = 物理核数（cap 在 8）
+    #   EVAL_INTRA_THREADS=0: 自动 = 物理核数（不分割，让每个 worker 的 torch 跑满）
+    PARALLEL_EVAL:        bool = True
+    EVAL_WORKERS:         int  = 0    # 0=auto (physical cores, cap 8)
+    EVAL_INTRA_THREADS:   int  = 0    # 0=auto (physical cores)
