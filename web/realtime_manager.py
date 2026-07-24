@@ -54,8 +54,13 @@ def _cadence_for(tf: str) -> int:
 def _next_bar_close_at(last_bar_open: int | None, timeframe: str, now: float | None = None) -> int | None:
     """根据最后已收盘 bar 的开盘时间，推算下次收盘（即下次信号更新）的 Unix 秒。
 
-    若最后一根已收盘 bar 已过时太久（超过约 2 个周期仍无新 bar），视为休市/断档，
+    若最后一根已收盘 bar 已过时太久，视为休市/断档，
     返回 None，避免在周末等时段虚构「几分钟后更新」的倒计时。
+
+    注意：阈值需兼顾 A 股/期货午休（1.5~2h）等盘中暂停场景。
+    对小周期（如 5m/15m）使用固定 2×period 会在午休期间误判为休市。
+    因此取 max(2×period, 7200)（至少 2 小时），确保跨过午休而不误报。
+    真正的跨日/周末休市（>2h 无新 bar）才正确显示"休市中"。
     """
     if last_bar_open is None:
         return None
@@ -65,17 +70,19 @@ def _next_bar_close_at(last_bar_open: int | None, timeframe: str, now: float | N
     now_i = int(now if now is not None else time.time())
     last_open = int(last_bar_open)
     last_close = last_open + period
+    # 兼顾午休：阈值至少 2 小时，避免 A 股/期货午休期间误判
+    tolerance = max(period * 2, 7200)
     # 仍未到收盘（常见于 MT5 终端时钟快于本机、或未剔除形成中 bar）
     if last_close > now_i:
         return last_close
-    # 正常交易中：上一根收盘距今至多约 1 个周期；再放宽到 2 个周期容错拉取延迟
-    if now_i - last_close > period * 2:
+    # 正常交易中：上一根收盘距今至多 tolerance 秒
+    if now_i - last_close > tolerance:
         return None
     # last_open 开盘 → last_close 收盘；当前形成中的 bar 在 +2*period 收盘
     nxt = last_open + 2 * period
     while nxt <= now_i:
         nxt += period
-        if nxt - last_close > period * 2:
+        if nxt - last_close > tolerance:
             return None
     return nxt
 

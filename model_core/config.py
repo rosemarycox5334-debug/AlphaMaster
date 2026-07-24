@@ -153,12 +153,18 @@ class ModelConfig:
     BETA_NEUTRAL_THRESH:      float = 0.85             # 超过此比例同方向触发重罚
     BETA_NEUTRAL_LIGHT_THRESH: float = 0.70            # 轻度失衡阈值
 
-    # ── 并行评估（CPU 利用率优化）────────────────────────────────────────
-    # 将 Part C 公式评估（VM 执行 + WF 折叠评估 + IC + 惩罚）并行化到
-    # ThreadPoolExecutor（PyTorch CPU 算子释放 GIL，多线程真正并行）。
-    # workers × intra_threads ≈ 物理核数，避免超线程过度订阅。
-    #   EVAL_WORKERS=0: 自动 = 物理核数（cap 在 8）
-    #   EVAL_INTRA_THREADS=0: 自动 = 物理核数（不分割，让每个 worker 的 torch 跑满）
-    PARALLEL_EVAL:        bool = True
+    # ── 并行评估（已实测关闭）──────────────────────────────────────────
+    # 曾尝试将 Part C 公式评估并行化到 ThreadPoolExecutor，设想 PyTorch CPU
+    # 算子释放 GIL 可多线程并行。但基准测试（8 逻辑核，5 品种，T=6000）证明
+    # 并行反而更慢：
+    #   串行(intra=8)          21.8 s/步   ← 最快
+    #   并行 8 workers×8 intra  33.9 s/步   (+55%)
+    #   并行 4 workers×2 intra  36.7 s/步   (+69%)
+    #   并行 8 workers×1 intra  >60 s/步    (更差)
+    # 根因：每条公式的 Python 编排（遍历 WF 折、.item()、IC、惩罚）全程持 GIL，
+    # 释放 GIL 的张量核算子太小，收益抵不过线程池 + 线程超订阅开销；串行下
+    # 每个算子用满 intra-op 线程池反而最高效。故保持 False。
+    # 串行回退路径复用 _eval_formula_task，逻辑与并行完全一致，仅执行方式不同。
+    PARALLEL_EVAL:        bool = False
     EVAL_WORKERS:         int  = 0    # 0=auto (physical cores, cap 8)
     EVAL_INTRA_THREADS:   int  = 0    # 0=auto (physical cores)
