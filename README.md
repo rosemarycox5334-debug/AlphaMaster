@@ -148,4 +148,4 @@ python scripts/capture_readme_shots.py
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=rosemarycox5334-debug/AlphaMaster&type=date&legend=top-left)](https://www.star-history.com/#rosemarycox5334-debug/AlphaMaster&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=rosemarycox5334-debug/AlphaMaster&type=date&legend=top-left)](https://star-history.dera.page/#rosemarycox5334-debug/AlphaMaster&type=date&legend=top-left)
