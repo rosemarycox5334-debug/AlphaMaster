@@ -1,121 +1,119 @@
-"""通达信数据源（pytdx，免费行情服务器，A 股 / 指数）。"""
+"""通达信数据源（新浪财经 HTTP API，A 股 / 指数）。
+
+pytdx 1.72 已停止维护，与当前通达信服务器协议不兼容（返回 ret_count=800
+但响应体只有 2 字节，导致 unpack 报错）。改用新浪财经公开 K 线接口，
+无需登录、稳定、支持 5m/15m/30m/1h/1d，1w/1M 从日线聚合，1m 自动降级到 5m。
+"""
 from __future__ import annotations
 
+import calendar
+import json
 import threading
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+import requests
 
 from web.data_sources.base import Bar, DataSource, DataSourceUnavailable
 
-# 通达信行情服务器（多个备选，按延迟排序）
-_SERVERS = [
-    ("115.238.90.165", 7709),
-    ("180.153.18.170", 7709),
-    ("119.147.212.81", 7709),
-    ("14.17.75.71", 7709),
-    ("59.173.18.77", 7709),
-    ("114.67.62.91", 7709),
-    ("115.238.56.198", 7709),
-    ("115.238.90.166", 7709),
-    ("60.12.136.218", 7709),
-    ("60.191.116.36", 7709),
-]
+_SINA_URL = (
+    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+    "CN_MarketData.getKLineData"
+)
+_CST = timezone(timedelta(hours=8))
 
-# 连接最大存活时间（秒），超过后强制重连，避免 pytdx 静默失效
-_CONN_MAX_AGE = 30
-
-# 项目周期 -> pytdx category
-_CAT = {
-    "1m": 8,
-    "5m": 0,
-    "15m": 1,
-    "30m": 2,
-    "1h": 3,
-    "1d": 9,
-    "1w": 5,
-    "1M": 6,
+# 项目周期 -> 新浪 scale（分钟）。1m 降级到 5m；1w/1M 从日线聚合。
+_SCALE = {
+    "1m": 5,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "1d": 240,
+    "1w": 240,
+    "1M": 240,
 }
+_AGGREGATE = {"1w", "1M"}
+
+# 新浪单次返回上限（实测 5000 可用）
+_MAX_DATALEN = 5000
 
 _PRESETS = ["600519", "000001", "300750", "601318", "000858", "sh000001", "sz399006"]
 
+_HTTP_TIMEOUT = 15.0
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    ),
+    "Referer": "https://finance.sina.com.cn/",
+}
+
 
 def _parse_market(code: str) -> tuple[int, str]:
-    """返回 (market, pure_code)。1=上海, 0=深圳。
+    """返回 (market, pure_code)。1=上海, 0=深圳。规则与旧实现一致。
 
-    优先按代码本身判定市场（002/003/300/301=深市中小板/创业板，
-    60/688/689=沪市主板/科创板，5=沪市基金，9=沪市B股，11/13=沪市转债），
-    仅当代码本身有歧义时（000xxx 可能是上证指数或深市股票）才以 sh/sz 前缀为准。
-    这样即使用户误写 sh002080 也能自动纠正为深市。
+    优先按代码本身判定（002/003/300/301=深市，60/688/689=沪市主板/科创板，
+    5/9/11/13=沪市基金/B股/转债，399=深证指数）；仅 000xxx 有歧义时才以
+    sh/sz 前缀为准（000001 无前缀 → 深市平安银行；sh000001 → 上证指数）。
     """
     c = code.strip().upper()
     has_prefix = c.startswith("SH") or c.startswith("SZ")
     prefix_market = 1 if c.startswith("SH") else 0
     pure = c[2:] if has_prefix else c
 
-    # 无歧义代码：按代码前缀直接判定，忽略用户写的 sh/sz 前缀
     if pure.startswith(("002", "003", "300", "301")):
-        return 0, pure  # 深市中小板 / 创业板
+        return 0, pure
     if pure.startswith(("60", "688", "689")):
-        return 1, pure  # 沪市主板 / 科创板
+        return 1, pure
     if pure[:1] in ("5", "9") or pure.startswith(("11", "13")):
-        return 1, pure  # 沪市基金 / B股 / 转债
+        return 1, pure
     if pure.startswith("399"):
-        return 0, pure  # 深证指数
+        return 0, pure
 
-    # 歧义代码：000xxx — 上证指数(sh000001/sh000300) vs 深市股票(sz000001=平安银行)
-    # 此时以 sh/sz 前缀为准；无前缀则默认深市股票
     if has_prefix:
         return prefix_market, pure
-    return 0, pure  # 无前缀的 000xxx 默认深市股票
+    return 0, pure
 
 
-_CST = timezone(timedelta(hours=8))  # 通达信返回的 datetime 为北京时间（UTC+8）
+def _to_sina_symbol(market: int, code: str) -> str:
+    return ("sh" if market == 1 else "sz") + code
 
 
-def _is_index(market: int, code: str) -> bool:
-    """判断是否为指数代码。
+def _parse_sina_dt(day: str) -> int:
+    """新浪 'day' 字段 -> 该 bar 收盘时刻的 Unix 秒（北京时间 UTC+8）。
 
-    上证指数系列：market=1 且 code 以 000 开头（如 000001 上证指数、000300 沪深300）。
-    深证指数系列：market=0 且 code 以 399 开头（如 399001 深证成指、399006 创业板指）。
-    注意：深圳市场 000xxx 是股票（如 000001 平安银行），只有 399xxx 才是深证指数，
-    因此不能用纯 code 前缀判断，必须结合 market。
+    - 分钟级：'2026-10-23 15:00:00'（本身就是 bar 结束时刻）
+    - 日级：'2026-10-23'（无时间，按 A 股 15:00 收盘处理）
     """
-    if market == 1 and code.startswith("000"):
-        return True
-    if market == 0 and code.startswith("399"):
-        return True
-    return False
-
-
-def _parse_dt(s: str) -> int:
-    """通达信 datetime（北京时间，如 '2026-07-15 15:00'）-> 收盘时刻的 Unix 秒。
-
-    返回值语义为「该 bar 的收盘时刻（UTC 秒）」；drop_forming / _ensure_closed_bars
-    据此判断是否已收盘（ts > now 即仍在形成中）。
-    """
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    s = str(day).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            return int(datetime.strptime(str(s), fmt).replace(tzinfo=_CST).timestamp())
+            dt = datetime.strptime(s, fmt)
         except ValueError:
             continue
+        if fmt == "%Y-%m-%d":
+            dt = dt.replace(hour=15, minute=0, second=0)
+        return int(dt.replace(tzinfo=_CST).timestamp())
     return 0
 
 
-def _looks_corrupted(raw) -> bool:
-    """检测返回数据是否乱码（datetime 年份异常）。
+def _week_end_ts(year: int, week: int) -> int:
+    """ISO 周的周五 15:00（北京时间）-> Unix 秒；非法周返回 0。"""
+    try:
+        monday = date.fromisocalendar(year, week, 1)
+    except ValueError:
+        return 0
+    friday = monday + timedelta(days=4)
+    dt = datetime(friday.year, friday.month, friday.day, 15, 0, 0, tzinfo=_CST)
+    return int(dt.timestamp())
 
-    典型场景：对指数误用 get_security_bars，第 2 条起 datetime 损坏（如 7772-67-85）；
-    或纯数字指数代码未带 sh/sz 前缀（如 000300）导致市场误判后取到异常数据。
-    """
-    if not raw:
-        return False
-    bad = 0
-    for r in raw:
-        s = str(r.get("datetime", ""))
-        y = int(s[:4]) if len(s) >= 4 and s[:4].isdigit() else -1
-        if not (1990 <= y <= 2035):
-            bad += 1
-    return bad > 0 and bad >= len(raw) * 0.3
+
+def _month_end_ts(year: int, month: int) -> int:
+    """某月最后一天 15:00（北京时间）-> Unix 秒。"""
+    last_day = calendar.monthrange(year, month)[1]
+    dt = datetime(year, month, last_day, 15, 0, 0, tzinfo=_CST)
+    return int(dt.timestamp())
 
 
 class TongdaxinSource(DataSource):
@@ -123,196 +121,176 @@ class TongdaxinSource(DataSource):
     label = "通达信"
 
     def __init__(self) -> None:
-        self._api = None
         self._lock = threading.Lock()
-        self._conn_time = 0.0  # 连接建立时间，用于检测过期连接
+        self._session: requests.Session | None = None
+        self._session_time = 0.0
 
     def available(self) -> tuple[bool, str]:
         try:
-            import pytdx  # noqa: F401
+            import requests  # noqa: F401
         except ImportError:
-            return (False, "未安装 pytdx：pip install pytdx")
-        return (True, "免费行情服务器 · A 股 / 指数")
+            return (False, "未安装 requests：pip install requests")
+        return (True, "新浪财经公开接口 · A 股 / 指数")
 
     def supported_timeframes(self) -> list[str]:
-        return list(_CAT.keys())
+        return list(_SCALE.keys())
 
     def preset_symbols(self) -> list[str]:
         return list(_PRESETS)
 
     def connect(self) -> None:
-        # 检查现有连接是否过期
-        if self._api is not None:
-            if time.time() - self._conn_time > _CONN_MAX_AGE:
-                # 连接过期，断开重连
-                self.disconnect()
-            else:
-                return
-        try:
-            from pytdx.hq import TdxHq_API
-        except ImportError as exc:
-            raise DataSourceUnavailable("未安装 pytdx") from exc
-        api = TdxHq_API()
-        for host, port in _SERVERS:
-            try:
-                if api.connect(host, port):
-                    self._api = api
-                    self._conn_time = time.time()
-                    return
-            except Exception:
-                continue
-        raise DataSourceUnavailable("通达信所有行情服务器连接失败")
+        # HTTP 无状态，无需建立长连接
+        self.disconnect()
 
     def disconnect(self) -> None:
-        if self._api is not None:
+        if self._session is not None:
             try:
-                self._api.disconnect()
+                self._session.close()
             except Exception:
                 pass
-        self._api = None
-        self._conn_time = 0.0
+        self._session = None
+        self._session_time = 0.0
 
-    def _fetch_raw(self, cat: int, market: int, code: str, want: int, is_index: bool, start: int = 0):
-        """指数走 get_index_bars，股票走 get_security_bars。
+    def _get_session(self) -> requests.Session:
+        # 15 分钟内复用 session（keep-alive）
+        if self._session is None or time.time() - self._session_time > 900:
+            s = requests.Session()
+            s.headers.update(_HTTP_HEADERS)
+            self._session = s
+            self._session_time = time.time()
+        return self._session
 
-        通达信协议规定指数必须用 get_index_bars；若对指数用 get_security_bars，
-        返回数据从第 2 条起 datetime 会损坏（年份变成 7772、228200 等乱码）。
+    def _fetch_raw(self, sina_symbol: str, scale: int, datalen: int) -> list[dict]:
+        """调用新浪 K 线接口，返回原始 dict 列表（可能为空）。"""
+        sess = self._get_session()
+        params = {
+            "symbol": sina_symbol,
+            "scale": scale,
+            "ma": "no",
+            "datalen": min(int(datalen), _MAX_DATALEN),
+        }
+        try:
+            r = sess.get(_SINA_URL, params=params, timeout=_HTTP_TIMEOUT)
+        except Exception as exc:
+            raise DataSourceUnavailable(f"新浪财经请求失败：{exc}") from exc
+        if r.status_code != 200:
+            raise DataSourceUnavailable(f"新浪财经返回 HTTP {r.status_code}")
+        text = (r.text or "").strip()
+        if not text or text == "null":
+            return []
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise DataSourceUnavailable(f"新浪财经返回无法解析：{text[:120]}") from exc
+        return data if isinstance(data, list) else []
+
+    def _aggregate(self, daily: list[dict], timeframe: str) -> list[dict]:
+        """把日线聚合成周线 / 月线。
+
+        返回项的 day 用「周五 15:00」或「月末最后一天 15:00」表示（理论周期结束），
+        以便 drop_forming 依据 ts>now 正确剔除仍在形成的聚合 bar。
         """
-        if is_index:
-            return self._api.get_index_bars(cat, market, code, start, want)
-        return self._api.get_security_bars(cat, market, code, start, want)
+        if not daily:
+            return []
+        groups: dict[tuple[int, int], list[dict]] = {}
+        for r in daily:
+            ts = _parse_sina_dt(r.get("day", ""))
+            if ts <= 0:
+                continue
+            dt = datetime.fromtimestamp(ts, tz=_CST)
+            if timeframe == "1w":
+                iso = dt.isocalendar()
+                key = (iso[0], iso[1])
+            else:  # 1M
+                key = (dt.year, dt.month)
+            groups.setdefault(key, []).append(r)
 
-    def _fetch_with_retry(
-        self, cat: int, market: int, code: str, want: int, is_index: bool, start: int = 0,
-        max_retries: int = 2,
-    ) -> list[dict]:
-        """带重连重试的拉取。pytdx 连接失效后不抛异常而是返回空数据，
-        所以遇到空数据时强制断开重连再试。"""
-        for attempt in range(max_retries + 1):
+        out: list[dict] = []
+        for key, rows in groups.items():
+            end_ts = _week_end_ts(*key) if timeframe == "1w" else _month_end_ts(*key)
+            if end_ts <= 0:
+                continue
             try:
-                raw = self._fetch_raw(cat, market, code, want, is_index, start=start)
-                if raw:
-                    return raw
-                # 空数据：可能是连接失效，强制重连
-                if attempt < max_retries:
-                    self._api = None
-                    self._conn_time = 0.0
-                    self.connect()
-                    continue
-            except Exception:
-                if attempt < max_retries:
-                    self._api = None
-                    self._conn_time = 0.0
-                    self.connect()
-                    continue
-                raise
-        return []
-
-    def _fetch_paginated(
-        self, cat: int, market: int, code: str, want: int, is_index: bool
-    ) -> list[dict]:
-        """分页拉取 K 线，突破 pytdx 单次 800 条限制。
-
-        pytdx 的 get_security_bars / get_index_bars 单次最多返回 800 条。
-        信号引擎通常需要 ≥3000 条历史数据，因此按 800/页分页拉取，
-        通过递增 start 偏移量逐页索取，最后按 datetime 去重合并。
-        """
-        PAGE = 800
-        all_raw: list[dict] = []
-        seen_dt: set[str] = set()
-        remaining = want
-        offset = 0
-
-        with self._lock:
-            self.connect()
-            while remaining > 0:
-                page_size = min(remaining, PAGE)
-                raw = self._fetch_with_retry(cat, market, code, page_size, is_index, start=offset)
-
-                if not raw:
-                    break  # 服务器无更多数据
-
-                # 按 datetime 去重（不同页可能重叠）
-                new_count = 0
-                for r in raw:
-                    dt = str(r.get("datetime", ""))
-                    if dt and dt not in seen_dt:
-                        seen_dt.add(dt)
-                        all_raw.append(r)
-                        new_count += 1
-
-                if new_count == 0:
-                    break  # 全部重复，已拉完
-
-                offset += len(raw)
-                remaining -= len(raw)
-
-                # 如果本页返回不足 page_size，说明服务器数据已到尽头
-                if len(raw) < page_size:
-                    break
-
-        return all_raw
+                o = float(rows[0]["open"])
+                c = float(rows[-1]["close"])
+                h = max(float(r["high"]) for r in rows)
+                l = min(float(r["low"]) for r in rows)
+                v = sum(float(r.get("volume", 0) or 0) for r in rows)
+            except (KeyError, ValueError, TypeError):
+                continue
+            out.append({
+                "day": datetime.fromtimestamp(end_ts, tz=_CST).strftime("%Y-%m-%d %H:%M:%S"),
+                "open": str(o),
+                "high": str(h),
+                "low": str(l),
+                "close": str(c),
+                "volume": str(v),
+            })
+        out.sort(key=lambda r: _parse_sina_dt(r["day"]))
+        return out
 
     def fetch_bars(
         self, symbol: str, timeframe: str, n: int, drop_forming: bool = True
     ) -> list[Bar]:
-        """拉取 K 线。
+        """从新浪财经拉取最近 n 根已收盘 K 线（升序）。
 
-        注意：返回的是不复权数据（pytdx 限制），历史含除权跳空；volume 单位为
-        「手」（1手=100股），与 OKX/MT5 的 volume 量纲不同，跨源不可比。
+        注意：volume 单位为「股」（Sina 原始单位），与旧 pytdx 的「手」不同。
         """
-        if timeframe not in _CAT:
-            raise DataSourceUnavailable(f"通达信不支持周期 {timeframe}")
+        if timeframe not in _SCALE:
+            raise DataSourceUnavailable(
+                f"通达信不支持周期 {timeframe}，支持 {list(_SCALE.keys())}"
+            )
         market, code = _parse_market(symbol)
-        cat = _CAT[timeframe]
-        want = max(n + 2, 20)  # 不再截断到 800，由 _fetch_paginated 分页拉取
-        is_index = _is_index(market, code)
+        sina_symbol = _to_sina_symbol(market, code)
+        scale = _SCALE[timeframe]
+        want = max(n + 2, 20)
 
-        raw = self._fetch_paginated(cat, market, code, want, is_index)
+        # 聚合周期需要更多原始日线
+        fetch_n = _MAX_DATALEN if timeframe in _AGGREGATE else want
 
-        # 回退机制：无前缀的 000xxx 代码可能是深市股票(如 000001 平安银行)，
-        # 也可能是沪市指数(如 sh000001 上证指数)。先按默认深市股票查，
-        # 如果空数据或数据异常，自动回退到沪市指数重试。
-        if not raw or _looks_corrupted(raw):
-            if not is_index and code.startswith("000"):
-                # 尝试沪市指数
-                alt_market = 1
-                alt_is_index = True
-                alt_raw = self._fetch_paginated(cat, alt_market, code, want, alt_is_index)
-                if alt_raw and not _looks_corrupted(alt_raw):
+        with self._lock:
+            raw = self._fetch_raw(sina_symbol, scale, fetch_n)
+
+        # 000xxx 无前缀：默认深市股票（000001=平安银行）。
+        # 若返回空，回退到沪市指数（000001=上证指数）。
+        if not raw and not symbol.strip().upper().startswith(("SH", "SZ")):
+            if code.startswith("000"):
+                alt_symbol = "sh" + code
+                with self._lock:
+                    alt_raw = self._fetch_raw(alt_symbol, scale, fetch_n)
+                if alt_raw:
                     raw = alt_raw
-                    market = alt_market
-                    is_index = alt_is_index
+                    sina_symbol = alt_symbol
 
         if not raw:
             raise DataSourceUnavailable(
-                f"通达信无数据：{symbol}（market={market}, code={code}）。"
+                f"通达信无数据：{symbol}（sina={sina_symbol}, scale={scale}）。"
                 f"请确认代码正确；指数需带 sh/sz 前缀（如 sh000001）。"
             )
-        if _looks_corrupted(raw):
-            # 数据乱码通常意味着接口选错（指数误用股票接口）或代码/市场不匹配。
-            # 纯数字指数代码（如 000300）未带 sh/sz 前缀时会误判市场，此处给出明确提示。
-            raise DataSourceUnavailable(
-                f"通达信返回数据异常：{symbol}。若为指数请使用 sh/sz 前缀"
-                f"（如 sh000001、sz399006），股票代码请确认无误。"
-            )
 
-        bars: list[Bar] = []
+        if timeframe in _AGGREGATE:
+            raw = self._aggregate(raw, timeframe)
+
+        ts_to_bar: dict[int, Bar] = {}
         for r in raw:
-            bars.append(
-                Bar(
-                    ts=_parse_dt(r.get("datetime", "")),
+            try:
+                ts = _parse_sina_dt(r.get("day", ""))
+                if ts <= 0:
+                    continue
+                ts_to_bar[ts] = Bar(
+                    ts=ts,
                     open=float(r["open"]),
                     high=float(r["high"]),
                     low=float(r["low"]),
                     close=float(r["close"]),
-                    volume=float(r.get("vol", 0.0) or 0.0),  # 单位：手（1手=100股）
+                    volume=float(r.get("volume", 0.0) or 0.0),
                 )
-            )
-        bars.sort(key=lambda b: b.ts)  # 保证升序
-        # 剔除尚未收盘的 bar：通达信 datetime 为收盘时刻（北京时间），_parse_dt
-        # 返回的 ts 即收盘时刻的 UTC 秒；ts > now 说明该 bar 仍在形成中。
-        # （不再盲删最后一条，以免盘后把当天已收盘 bar 误删，导致 last_bar 滞后一天。）
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        bars = sorted(ts_to_bar.values(), key=lambda b: b.ts)
+
+        # 剔除未收盘 / 未来 bar：ts 为收盘时刻，ts>now 说明仍在形成中
         if drop_forming and bars:
             now = time.time()
             while bars and int(bars[-1].ts) > now:
