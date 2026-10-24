@@ -5,7 +5,7 @@ import threading
 
 from web.data_sources.base import DataSource
 
-# 前端下拉可见的数据源（国内期货默认隐藏，如需启用加回列表即可）
+# 前端下拉可见的数据源（A股/国内期货默认隐藏，如需启用加回列表即可）
 SOURCE_KINDS: tuple[tuple[str, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
@@ -25,6 +25,9 @@ def _build(kind: str) -> DataSource:
     if kind == "okx":
         from web.data_sources.okx_source import OKXSource
         return OKXSource()
+    if kind == "ashare":
+        from web.data_sources.ashare_source import AShareSource
+        return AShareSource()
     if kind == "tongdaxin":
         from web.data_sources.tongdaxin_source import TongdaxinSource
         return TongdaxinSource()

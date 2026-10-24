@@ -44,7 +44,10 @@ _TF_SECONDS = {
 _DEFAULT_CADENCE = 60
 _N_BARS = 1000                # 每次拉取的历史 bar 数（实盘最低需 800：特征warm-up 200 + VM滚动归一化 500 + 余量）
 _HISTORY_LEN = 60             # 保留的信号强度历史点数（供 sparkline）
-_VALID_KINDS = {k for k, _ in SOURCE_KINDS}
+# 校验用：包含所有已实现的源（UI 可见 + 隐藏），避免隐藏后已保存的监控项失效
+_VALID_KINDS = {k for k, _ in SOURCE_KINDS} | {
+    "okx", "tongdaxin", "domestic_futures", "ashare",
+}
 
 
 def _cadence_for(tf: str) -> int:
