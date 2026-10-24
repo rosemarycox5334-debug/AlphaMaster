@@ -362,26 +362,68 @@ class AlphaEngine:
 
             with torch.no_grad():
                 if use_wf:
+                    # P1b: rolling WF has overlapping train/validation windows:
+                    # A->B, B->C, C->D, D->E.  Evaluate each unique window once.
+                    # Position/turnover/PnL are fold-invariant and are also built once.
+                    position = compute_target_positions_stateless(res)
+                    prev_pos = torch.roll(position, 1, dims=1)
+                    prev_pos[:, 0] = 0.0
+                    turnover = torch.abs(position - prev_pos)
+                    pnl = position * t_ret - turnover * self.bt.cost_rate
+
+                    unique_windows: list[tuple[int, int]] = []
+                    seen_windows: set[tuple[int, int]] = set()
+                    for fold in folds:
+                        for key in (
+                            (fold["train_start"], fold["train_end"]),
+                            (fold["val_start"], fold["val_end"]),
+                        ):
+                            if key not in seen_windows:
+                                seen_windows.add(key)
+                                unique_windows.append(key)
+
+                    # value = (base multi-objective, sortino, IC, turnover penalty)
+                    window_stats: dict[tuple[int, int], tuple] = {}
+                    for start_i, end_i in unique_windows:
+                        factor_i = res[:, start_i:end_i]
+                        target_i = t_ret[:, start_i:end_i]
+                        pnl_i = pnl[:, start_i:end_i]
+                        position_i = position[:, start_i:end_i]
+                        turnover_i = turnover[:, start_i:end_i]
+
+                        sortino_i = self.bt._sortino(pnl_i)
+                        base_i = self.bt._multi_objective(
+                            factor_i, target_i, pnl_i, position_i,
+                            eval_bars=end_i - start_i,
+                            _precomputed_sortino=sortino_i,
+                        )
+                        ic_i_window, _ = AlphaEngine._compute_ic(
+                            factor_i, target_i
+                        )
+                        turnover_penalty_i = self.bt._turnover_penalty(turnover_i)
+                        window_stats[(start_i, end_i)] = (
+                            base_i, sortino_i, ic_i_window, turnover_penalty_i
+                        )
+
                     fold_tr, fold_vl, fold_ic = [], [], []
                     for fold in folds:
-                        tr_sc, vl_sc = self.bt.evaluate_fold(
-                            res, t_ret,
-                            fold["train_start"], fold["train_end"],
-                            fold["val_start"],   fold["val_end"],
-                        )
-                        ic_m, _ = AlphaEngine._compute_ic(
-                            res[:, fold["train_start"]:fold["train_end"]],
-                            t_ret[:, fold["train_start"]:fold["train_end"]],
-                        )
-                        tr_adj = AlphaEngine._apply_ic_gate(tr_sc, ic_m)
+                        tr = window_stats[(fold["train_start"], fold["train_end"])]
+                        vl = window_stats[(fold["val_start"], fold["val_end"])]
+
+                        tr_sc = tr[0] + tr[3]
+                        oos_sor = vl[1].item()
+                        if oos_sor <= 0:
+                            mult = max(0.1, 0.5 + oos_sor * 0.4)
+                        else:
+                            mult = min(1.2, 1.0 + oos_sor * 0.1)
+                        vl_sc = vl[0] * mult
+
+                        tr_adj = AlphaEngine._apply_ic_gate(tr_sc, tr[2])
                         fold_tr.append(ModelConfig.REWARD_ALPHA * tr_adj)
-                        ic_v, _ = AlphaEngine._compute_ic(
-                            res[:, fold["val_start"]:fold["val_end"]],
-                            t_ret[:, fold["val_start"]:fold["val_end"]],
-                        )
-                        vl_adj = AlphaEngine._apply_ic_gate(vl_sc, ic_v)
+                        vl_adj = AlphaEngine._apply_ic_gate(vl_sc, vl[2])
                         fold_vl.append(vl_adj)
-                        fold_ic.append(ic_m.item())
+                        fold_ic.append(tr[2].item())
+
                     train_score = torch.stack(fold_tr).mean()
                     val_score = torch.stack(fold_vl).mean()
                     ic_i = sum(fold_ic) / len(fold_ic)
@@ -421,8 +463,9 @@ class AlphaEngine:
                 _corr_slice = (folds[0]["train_start"], folds[0]["train_end"])
             else:
                 _corr_slice = (0, max(int(res.shape[1] * 0.8), res.shape[1] - 100))
-            reward = self._apply_corr_penalty(reward, res, _corr_slice)
-            val_score_out = self._apply_corr_penalty(val_score_out, res, _corr_slice)
+            if self._corr_penalty_applies(res, _corr_slice):
+                reward = reward * ModelConfig.CORR_PENALTY
+                val_score_out = val_score_out * ModelConfig.CORR_PENALTY
 
             return {
                 'idx': idx, 'status': 'ok',
@@ -547,20 +590,14 @@ class AlphaEngine:
         elif val_score > self.factor_pool[0][0]:
             heapq.heapreplace(self.factor_pool, entry)
 
-    def _apply_corr_penalty(
+    def _corr_penalty_applies(
         self,
-        reward: torch.Tensor,
         factor: torch.Tensor,
         train_slice: tuple[int, int] | None = None,
-    ) -> torch.Tensor:
-        """相关性惩罚：与因子池中已有因子的相关性超过阈值则惩罚 reward。
-
-        P1-6 修复：相关性只在 train 切片上计算，避免含 val 段数据泄漏。
-        train_slice=None 时回退到整段（向后兼容）。
-        """
+    ) -> bool:
+        """Return the exact predicate used by ``_apply_corr_penalty``."""
         if not self.factor_pool:
-            return reward
-        # P1-6: 相关性只在 train 切片上计算，避免 val 信息泄漏
+            return False
         if train_slice is not None:
             s, e = train_slice
             f = factor.detach()[:, s:e]
@@ -568,8 +605,8 @@ class AlphaEngine:
             f = factor.detach()
         f_flat = f.reshape(-1).float()
         if f_flat.std() < 1e-4:
-            return reward
-        # 因子池中的历史因子也按相同切片取（若形状一致）
+            return False
+
         pool_vecs_list = []
         for _, _cnt, pf in self.factor_pool:
             pf_t = pf.detach()
@@ -577,16 +614,26 @@ class AlphaEngine:
                 pf_t = pf_t[:, s:e]
             pool_vecs_list.append(pf_t.reshape(-1).float())
         if not pool_vecs_list:
-            return reward
+            return False
+
         pool_vecs = torch.stack(pool_vecs_list, dim=0)
-        f_c  = f_flat - f_flat.mean()
-        p_c  = pool_vecs - pool_vecs.mean(dim=1, keepdim=True)
-        cov  = (p_c * f_c).sum(dim=1)
-        sx   = f_c.norm() + 1e-8
-        sy   = p_c.norm(dim=1) + 1e-8
+        f_c = f_flat - f_flat.mean()
+        p_c = pool_vecs - pool_vecs.mean(dim=1, keepdim=True)
+        cov = (p_c * f_c).sum(dim=1)
+        sx = f_c.norm() + 1e-8
+        sy = p_c.norm(dim=1) + 1e-8
         corr = (cov / (sx * sy)).abs()
-        if (corr > ModelConfig.CORR_THRESHOLD).any():
-            reward = reward * ModelConfig.CORR_PENALTY
+        return bool((corr > ModelConfig.CORR_THRESHOLD).any())
+
+    def _apply_corr_penalty(
+        self,
+        reward: torch.Tensor,
+        factor: torch.Tensor,
+        train_slice: tuple[int, int] | None = None,
+    ) -> torch.Tensor:
+        """Apply the historical correlation penalty without changing semantics."""
+        if self._corr_penalty_applies(factor, train_slice):
+            return reward * ModelConfig.CORR_PENALTY
         return reward
 
     def _distribution_stats(self, prev_dist=None):

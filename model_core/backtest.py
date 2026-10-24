@@ -285,34 +285,32 @@ class MT5Backtest:
         return float(torch.clamp(sortino, -5.0, 5.0))
 
     def _turnover_quality(self, position: Tensor) -> float:
-        """交易频率质量奖励（每天约 1 笔为最优）。
+        """交易频率质量奖励；保持旧 ``int(p)`` 语义的向量化实现。
 
-        目标：每 12 bar 一笔（H1 每天约一笔）。
+        P1b 只消除 Python ``Tensor -> list -> per-bar`` 循环，不改变指标定义。
+        Python ``int(float)`` 对有限值是朝 0 截断，因此用 ``torch.trunc`` 精确表示。
+        连续仓位路径当前落在 (-1, 1)，所以该旧指标会退化为常数 -2；这是独立的
+        correctness 问题，不在本性能补丁中修改。
         """
         N, T = position.shape
-        pos_2d = position.tolist()
-        all_runs, total_trades = [], 0
+        discrete = torch.trunc(position).to(torch.int64)
+        active = discrete.ne(0)
 
-        for n in range(N):
-            runs, cur_len, cur_dir = [], 0, 0
-            for p in pos_2d[n]:
-                pi = int(p)
-                if pi != 0:
-                    if pi == cur_dir:
-                        cur_len += 1
-                    else:
-                        if cur_len > 0: runs.append(cur_len)
-                        cur_dir, cur_len = pi, 1
-                else:
-                    if cur_len > 0: runs.append(cur_len)
-                    cur_dir, cur_len = 0, 0
-            if cur_len > 0: runs.append(cur_len)
-            all_runs.extend(runs)
-            total_trades += len(runs)
+        if not bool(active.any()):
+            return -2.0
 
-        total_bars    = N * T
+        prev = torch.zeros_like(discrete)
+        prev[:, 1:] = discrete[:, :-1]
+        starts = active & ((prev == 0) | (discrete != prev))
+        total_trades = int(starts.sum().item())
+        if total_trades <= 0:
+            return -2.0
+
+        # 旧实现的 sum(all_runs) 等于所有非零离散仓位 bar 的数量。
+        active_bars = int(active.sum().item())
+        total_bars = N * T
         target_trades = total_bars / 12.0
-        actual_ratio  = total_trades / max(target_trades, 1.0)
+        actual_ratio = total_trades / max(target_trades, 1.0)
 
         if actual_ratio <= 0:
             freq_score = -2.0
@@ -328,11 +326,11 @@ class MT5Backtest:
         else:
             freq_score = -2.0
 
-        hold_bonus = 0.0
-        if all_runs:
-            avg_hold = sum(all_runs) / len(all_runs)
-            hold_bonus = min(0.3, math.log(max(avg_hold, 1.0)) / math.log(30.0) * 0.3)
-
+        avg_hold = active_bars / total_trades
+        hold_bonus = min(
+            0.3,
+            math.log(max(avg_hold, 1.0)) / math.log(30.0) * 0.3,
+        )
         return float(freq_score + hold_bonus)
 
     def _beta_neutral_penalty(self, position: Tensor) -> float:
@@ -507,6 +505,7 @@ class MT5Backtest:
         pnl:        Tensor,
         position:   Tensor,
         eval_bars:  int = 0,
+        _precomputed_sortino: Tensor | None = None,
     ) -> Tensor:
         """收益优先的多目标评分（2026-07-04 重构）。
 
@@ -525,7 +524,7 @@ class MT5Backtest:
         # pnl.mean() 已是单 bar 平均收益，因此年化只乘每年 bar 数；不能再除以样本长度。
         ann_ret = pnl.mean() * self.periods_per_year   # 标量张量，无截断
 
-        port_sortino = self._sortino(pnl)
+        port_sortino = self._sortino(pnl) if _precomputed_sortino is None else _precomputed_sortino
         port_calmar  = self._calmar(pnl)
         ts_ic        = self._ts_ic_stability(factors, target_ret)
         tq           = self._turnover_quality(position)
