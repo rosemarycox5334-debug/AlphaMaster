@@ -2,7 +2,7 @@
 
 基于深度神经网络强化学习的量化因子挖掘中心：从 Parquet / MT5 K 线自动搜索可解释因子公式，支持 Web 端训练、回测与实时信号分析。
 
-**QQ 交流群：1063897401**
+**QQ 交流群：922829084**
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
