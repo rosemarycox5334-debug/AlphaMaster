@@ -335,8 +335,13 @@ def stream_chat_completions(
     *,
     max_tokens: int = 4096,
     timeout: float = 180.0,
+    reasoning_effort: str | None = None,
 ):
-    """Yield text deltas from OpenAI-compatible streaming chat completions."""
+    """Yield text deltas from OpenAI-compatible streaming chat completions.
+
+    ``reasoning_effort`` is only forwarded when given: some gateways (SenseNova)
+    reject a string ``thinking`` field but accept this one.
+    """
     import urllib.error
     import urllib.request
 
@@ -348,6 +353,8 @@ def stream_chat_completions(
         "max_tokens": capped,
         "stream": True,
     }
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     if resolved.provider == "openclaw":
         payload["tool_choice"] = "none"
 

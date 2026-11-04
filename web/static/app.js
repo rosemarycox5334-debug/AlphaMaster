@@ -854,6 +854,7 @@ async function runAiAnalyze() {
 
   let header = "";
   let answer = "";
+  let notice = "";
 
   try {
     const res = await fetch(API + "/api/ai/analyze-training", {
@@ -908,7 +909,12 @@ async function runAiAnalyze() {
           view.scrollTop = view.scrollHeight;
         } else if (event.type === "delta") {
           answer += event.text || "";
+          notice = "";
           view.textContent = header + answer;
+          view.scrollTop = view.scrollHeight;
+        } else if (event.type === "notice") {
+          notice = event.text || "";
+          view.textContent = header + answer + (answer ? "\n\n" : "") + notice;
           view.scrollTop = view.scrollHeight;
         } else if (event.type === "error") {
           throw new Error(event.message || "分析失败");

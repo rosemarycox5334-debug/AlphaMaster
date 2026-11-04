@@ -240,9 +240,7 @@ def analyze_training_stream(
     model: str | None = None,
     symbol: str | None = None,
 ):
-    """Yield SSE-ready event dicts: meta / delta / done / error."""
-    from web.ai_providers import stream_chat_completions
-
+    """Yield SSE-ready event dicts: meta / notice / delta / done / error."""
     try:
         snapshot = build_training_snapshot(symbol)
         prior = load_prior_analyses(snapshot["symbol"], snapshot["timeframe"])
@@ -299,7 +297,13 @@ def analyze_training_stream(
 
     answer_parts: list[str] = []
     try:
-        for text in stream_chat_completions(resolved, messages):
+        # Layered fallback (primary → spare model → free pool → fallbacks → openclaw).
+        from web.ai_fallback import stream_with_fallbacks
+
+        for kind, text in stream_with_fallbacks(resolved, messages):
+            if kind == "notice":
+                yield {"type": "notice", "text": text}
+                continue
             answer_parts.append(text)
             yield {"type": "delta", "text": text}
     except Exception as exc:
