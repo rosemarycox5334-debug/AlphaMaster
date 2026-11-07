@@ -220,8 +220,14 @@ def _is_sensenova(base_url: str) -> bool:
     return "sensenova.cn" in (base_url or "").lower()
 
 
+def _is_ark(base_url: str) -> bool:
+    from web.ark_gateway import is_ark_base
+
+    return is_ark_base(base_url)
+
+
 def _clamp_max_tokens(base_url: str, model: str, max_tokens: int) -> int:
-    """Avoid 400 from gateway-specific max_tokens caps (e.g. SenseNova)."""
+    """Avoid 400 from gateway-specific max_tokens caps (e.g. SenseNova/Ark)."""
     if max_tokens <= 0:
         return max_tokens
     if _is_sensenova(base_url):
@@ -231,6 +237,11 @@ def _clamp_max_tokens(base_url: str, model: str, max_tokens: int) -> int:
             else _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS
         )
         max_tokens = min(max_tokens, cap)
+    elif _is_ark(base_url):
+        # 方舟模型级上限不同（豆包 262144），项目默认值会直接 400。
+        from web.ark_gateway import ARK_MAX_OUTPUT_TOKENS
+
+        max_tokens = min(max_tokens, ARK_MAX_OUTPUT_TOKENS)
     return min(max_tokens, _GLOBAL_MAX_OUTPUT_TOKENS)
 
 
@@ -261,6 +272,14 @@ def resolve_provider(
         label = "SenseNova" if _is_sensenova(resolved_url) else "OpenAI 兼容"
         if "deepseek.com" in resolved_url.lower():
             label = "DeepSeek"
+        if _is_ark(resolved_url):
+            # 方舟：每次分析轮换一个模型（不论 model 栏填什么），并翻译别名。
+            from web.ark_gateway import next_rotation_model, resolve_ark_model
+
+            alias = resolve_ark_model(resolved_model)
+            resolved_model = next_rotation_model()
+            label = f"火山方舟 · {resolved_model}"
+            logger.info("方舟模型轮换：请求=%s 别名=%s 本次=%s", model, alias, resolved_model)
         return ResolvedProvider(
             provider="deepseek",
             model=resolved_model,
@@ -353,7 +372,12 @@ def stream_chat_completions(
         "max_tokens": capped,
         "stream": True,
     }
-    if reasoning_effort:
+    if _is_ark(resolved.base_url):
+        # 方舟要求 thinking.type=enabled/disabled；强度固定 low（实测最快）。
+        from web.ark_gateway import chat_payload_extra
+
+        payload.update(chat_payload_extra())
+    elif reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
     if resolved.provider == "openclaw":
         payload["tool_choice"] = "none"

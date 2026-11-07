@@ -115,3 +115,4 @@ secrets/
 *.key
 credentials*.json
 local_settings*.json
+ark_rotation_state.json

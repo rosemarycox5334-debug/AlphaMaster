@@ -203,6 +203,9 @@ def stream_with_fallbacks(
     partial text must not be duplicated. An empty answer counts as a failure.
     """
     sense = is_sensenova_base(resolved.base_url)
+    from web.ark_gateway import fallback_models, is_account_level_error, is_ark_base
+
+    ark = is_ark_base(resolved.base_url)
     errors: list[str] = []
 
     def _run(fn, layer: str) -> Iterator[tuple[str, str]]:
@@ -227,11 +230,31 @@ def stream_with_fallbacks(
         primary_exc = exc
 
     rate_limited = is_rate_limit_error(primary_exc)
-    if sense:
+    if (sense or ark) and not is_account_level_error(primary_exc):
         _progress(on_progress)
         yield ("notice", NEUTRAL_PROGRESS_TEXT)
 
-    # ── Layer 2: spare model (rate limits only) ─────────────────────────────
+    # ── Layer 2: Ark 同网关模型池（额度用完/未开通时逐个换）──────────────────
+    if ark and not is_account_level_error(primary_exc):
+        for model in fallback_models(resolved.model):
+            try:
+                yield from _run(
+                    lambda m=model: stream_chat_completions(
+                        replace(resolved, model=m, label=f"火山方舟 · {m}"),
+                        messages,
+                        max_tokens=max_tokens,
+                        timeout=timeout,
+                    ),
+                    f"ark:{model}",
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"ark:{model}: {exc}")
+                if is_account_level_error(exc):
+                    break
+                continue
+
+    # ── Layer 3: spare model (SenseNova rate limits only) ───────────────────
     if sense and rate_limited:
         try:
             spare = spare_provider(resolved)
@@ -249,8 +272,8 @@ def stream_with_fallbacks(
         except Exception as exc:  # noqa: BLE001
             errors.append(f"spare: {exc}")
 
-    # ── Layer 3: free pool (SenseNova gateways) ─────────────────────────────
-    if sense:
+    # ── Layer 4: free pool (SenseNova / Ark after their pool is exhausted) ──
+    if sense or ark:
         for model in KILO_FREE_MODELS:
             try:
                 yield from _run(
