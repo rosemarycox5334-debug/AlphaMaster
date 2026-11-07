@@ -279,7 +279,7 @@ def resolve_provider(
             alias = resolve_ark_model(resolved_model)
             resolved_model = next_rotation_model()
             label = f"火山方舟 · {resolved_model}"
-            logger.info("方舟模型轮换：请求=%s 别名=%s 本次=%s", model, alias, resolved_model)
+            logger.debug("方舟模型轮换：请求=%s 别名=%s 本次=%s", model, alias, resolved_model)
         return ResolvedProvider(
             provider="deepseek",
             model=resolved_model,
