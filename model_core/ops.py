@@ -18,6 +18,8 @@ model_core/ops.py -- 算子库（Operator_Library, R2）
 的 `ArityMismatchError` 误报。
 """
 import torch
+import numpy as np
+from scipy.signal import lfilter as _scipy_lfilter
 
 from .registry import OperatorSpec, Registry
 
@@ -144,35 +146,78 @@ def _ema(x: torch.Tensor, alpha: float) -> torch.Tensor:
     # 上面的 unfold 对 1D 不直接 work，改用简单循环近似
 
 
-def _ema_simple(x: torch.Tensor, span: int, exact: bool = False) -> torch.Tensor:
-    """指数加权移动平均（因果），span 期。
+def _ema_simple_reference(x: torch.Tensor, span: int) -> torch.Tensor:
+    """Reference exact causal EMA using the original PyTorch recurrence.
 
-    P1-10 修复：统一使用 exact 递推路径，避免训练时 T 大走 vectorized 卷积近似、
-    实盘时 T 小走 exact 递推导致的 train-serve skew（虽然 max|Δ|<1e-4，但会
-    通过 MACD_HIST/PPO/TRIX_15/EMA_RATIO_12_26/TREND_STRENGTH_50/SUPERTREND_DIR/
-    SAR_DIST 等特征传播，在 tanh 阈值附近可能改变方向判定）。
-
-    实测 exact 递推在 N=1, T=10000 下耗时 < 5ms，性能损失可接受。
-
-    参数：
-        span: EMA 周期
-        exact: 保留参数兼容性，无论取值均使用 exact 递推（统一路径）
+    This intentionally preserves the upstream 1.24 evaluation order and is kept
+    as the numerical oracle/fallback for non-CPU tensors or tensors that require
+    gradients.  It is O(T) Python dispatch and therefore not the normal CPU path.
     """
     alpha = 2.0 / (span + 1.0)
     N, T = x.shape
-
     if T == 0:
         return x.clone()
     if alpha >= 1.0:
         return x.clone()
 
-    # ── 统一使用 exact 递推路径（O(N·T) 顺序累积）──────────────────
-    # 消除 T < 2*w_full 与 T >= 2*w_full 的路径分叉，保证训练/实盘数值一致
     out = torch.zeros_like(x)
     out[:, 0] = x[:, 0]
     for t in range(1, T):
         out[:, t] = alpha * x[:, t] + (1 - alpha) * out[:, t - 1]
     return out
+
+
+def _ema_simple(x: torch.Tensor, span: int, exact: bool = False) -> torch.Tensor:
+    """Exact causal EMA with a compiled CPU recurrence.
+
+    Mathematical contract (unchanged from upstream 1.24)::
+
+        y[0] = x[0]
+        y[t] = alpha*x[t] + (1-alpha)*y[t-1]
+        alpha = 2/(span+1)
+
+    P1a (2026-09-03): the upstream implementation executed the recurrence as
+    ~T Python-level PyTorch dispatches.  At T≈235k this made EMA formulas tens
+    of times slower than ordinary formulas.  On CPU/no-grad tensors we execute
+    the same first-order IIR recurrence through SciPy's compiled ``lfilter``.
+    Coefficients and state are cast to the input NumPy dtype; the initial filter
+    state is chosen so the first output remains exactly ``x[:, 0]``.
+
+    The original PyTorch recurrence remains the fallback for CUDA, unsupported
+    dtypes, or autograd tensors.  ``exact`` is retained for API compatibility;
+    both paths implement the same exact causal definition.
+    """
+    alpha = 2.0 / (span + 1.0)
+    if x.ndim != 2:
+        raise ValueError(f"EMA expects [N,T], got shape={tuple(x.shape)}")
+    if x.shape[1] == 0 or alpha >= 1.0:
+        return x.clone()
+
+    if (
+        x.device.type == "cpu"
+        and not x.requires_grad
+        and x.dtype in (torch.float32, torch.float64)
+    ):
+        arr = x.detach().contiguous().numpy()
+        dtype = arr.dtype
+        beta = 1.0 - alpha
+        b = np.asarray([alpha], dtype=dtype)
+        a = np.asarray([1.0, -beta], dtype=dtype)
+        if arr.shape[1] == 1:
+            return x.clone()
+
+        # Preserve the upstream boundary condition *exactly*: y[0] = x[0].
+        # Run the compiled recurrence only for t>=1 with state beta*y[0].
+        zi = (beta * arr[:, :1]).astype(dtype, copy=False)
+        tail, _ = _scipy_lfilter(b, a, arr[:, 1:], axis=1, zi=zi)
+        if tail.dtype != dtype:
+            tail = tail.astype(dtype, copy=False)
+        out = np.empty_like(arr)
+        out[:, 0] = arr[:, 0]
+        out[:, 1:] = tail
+        return torch.from_numpy(out)
+
+    return _ema_simple_reference(x, span)
 
 
 def _ts_quantile(x: torch.Tensor, d: int) -> torch.Tensor:
