@@ -125,7 +125,7 @@ def test_non_rate_limit_error_skips_the_spare_model(monkeypatch):
         yield  # pragma: no cover
 
     _patch(monkeypatch, fake)
-    monkeypatch.setattr("web.ai_fallback._stream_kilo", free)
+    monkeypatch.setattr("web.ai_fallback._stream_free", free)
     monkeypatch.setattr(
         "web.ai_fallback.load_fallbacks", lambda: [_prov(model="glm-4-flash")]
     )
@@ -142,13 +142,17 @@ def test_spare_failure_falls_through_to_free_pool(monkeypatch):
         raise RuntimeError("429 rate limit")
         yield  # pragma: no cover
 
+    from web.ai_fallback import _FREE_ROUTES as _routes
+
+    fail_model = _routes[1][0]
+
     def free(model, msgs, **kw):
-        if model.endswith("beam-free"):
+        if model == fail_model:
             raise RuntimeError("502 upstream")
         yield "free answer"
 
     _patch(monkeypatch, fake)
-    monkeypatch.setattr("web.ai_fallback._stream_kilo", free)
+    monkeypatch.setattr("web.ai_fallback._stream_free", free)
     out = list(stream_with_fallbacks(_prov(), [{"role": "user", "content": "hi"}]))
 
     assert ("text", "free answer") in out
@@ -185,7 +189,7 @@ def test_all_layers_failing_raises(monkeypatch):
         yield  # pragma: no cover
 
     _patch(monkeypatch, fake)
-    monkeypatch.setattr("web.ai_fallback._stream_kilo", free)
+    monkeypatch.setattr("web.ai_fallback._stream_free", free)
     monkeypatch.setattr("web.ai_fallback.load_fallbacks", lambda: [])
     monkeypatch.setattr("web.ai_fallback._openclaw_provider", lambda: None)
 
@@ -201,6 +205,6 @@ def test_empty_answer_counts_as_failure(monkeypatch):
         yield "rescued"
 
     _patch(monkeypatch, fake)
-    monkeypatch.setattr("web.ai_fallback._stream_kilo", free)
+    monkeypatch.setattr("web.ai_fallback._stream_free", free)
     out = list(stream_with_fallbacks(_prov(), [{"role": "user", "content": "hi"}]))
     assert ("text", "rescued") in out

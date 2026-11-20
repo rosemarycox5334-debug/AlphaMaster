@@ -276,10 +276,8 @@ def resolve_provider(
             # 方舟：每次分析轮换一个模型（不论 model 栏填什么），并翻译别名。
             from web.ark_gateway import next_rotation_model, resolve_ark_model
 
-            alias = resolve_ark_model(resolved_model)
             resolved_model = next_rotation_model()
-            label = f"火山方舟 · {resolved_model}"
-            logger.debug("方舟模型轮换：请求=%s 别名=%s 本次=%s", model, alias, resolved_model)
+            label = "AI"
         return ResolvedProvider(
             provider="deepseek",
             model=resolved_model,

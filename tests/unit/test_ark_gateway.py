@@ -64,7 +64,7 @@ def test_resolution_rotates_models(state_file):
     for _ in range(3):
         r = resolve_provider("deepseek", "ark-test", base_url=ARK_BASE_URL, model="deepseek-flash")
         seen.append(r.model)
-        assert r.label.startswith("火山方舟")
+        assert r.label == "AI"          # 对外不暴露实际模型/渠道
     assert seen == ["kimi-k3-1-pro-261024",
                     "deepseek-v4-1-flash-economy-261017",
                     "doubao-seed-2-1-lite-260915"]
@@ -157,13 +157,13 @@ def test_fallback_order_ark_then_free_then_configured(monkeypatch):
         raise RuntimeError("HTTP 500 server error")
         yield ""  # pragma: no cover
 
-    def fake_kilo(model, messages, **kw):
+    def fake_free(model, messages, **kw):
         calls.append(("free", model))
         raise RuntimeError("free down")
         yield ""  # pragma: no cover
 
     monkeypatch.setattr(fb, "stream_chat_completions", fake_stream)
-    monkeypatch.setattr(fb, "_stream_kilo", fake_kilo)
+    monkeypatch.setattr(fb, "_stream_free", fake_free)
     monkeypatch.setattr(fb, "load_fallbacks", lambda: [
         ResolvedProvider(provider="deepseek", model="glm-4-flash",
                          base_url="https://open.bigmodel.cn/api/paas/v4",
@@ -194,12 +194,12 @@ def test_account_overdue_skips_ark_pool(monkeypatch):
         raise RuntimeError("403 AccountOverdueError: overdue balance")
         yield ""  # pragma: no cover
 
-    def fake_kilo(model, messages, **kw):
+    def fake_free(model, messages, **kw):
         calls.append("free")
         yield "免费OK"
 
     monkeypatch.setattr(fb, "stream_chat_completions", fake_stream)
-    monkeypatch.setattr(fb, "_stream_kilo", fake_kilo)
+    monkeypatch.setattr(fb, "_stream_free", fake_free)
     monkeypatch.setattr(fb, "load_fallbacks", lambda: [])
 
     out = [v for k, v in fb.stream_with_fallbacks(_resolved(), [{"role": "user", "content": "hi"}]) if k == "text"]

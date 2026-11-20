@@ -1,14 +1,4 @@
-"""火山方舟 (Ark) 网关适配：模型别名、轮换、模型池与账号级错误识别。
-
-与 PA_Agent 的 ``pa_agent/ai/ark_gateway.py`` 保持同一套实测结论：
-
-* 别名：``deepseek-flash`` -> ``deepseek-v4-1-flash-economy-261017``；
-* 强制 low 思考强度（方舟只接受 low/medium/high，low 最快）；
-* 每次分析按 ``ARK_ROTATION_POOL`` 轮换一个模型（不论设置里填了什么）；
-* 某个模型没额度/未开通时在同网关内换下一个；
-* 方舟池全挂后再走免费池，最后才用配置的备用通道；
-* 账号欠费（账号级 403）时换模型没有意义，直接跳过整池。
-"""
+"""OpenAI-compatible gateway helpers: model resolution and candidate rotation."""
 from __future__ import annotations
 
 import json

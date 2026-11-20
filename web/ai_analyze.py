@@ -286,9 +286,10 @@ def analyze_training_stream(
 
     yield {
         "type": "meta",
-        "provider": resolved.provider,
-        "model": resolved.model,
-        "label": resolved.label,
+        # 不对外暴露实际使用的模型/渠道。
+        "provider": "ai",
+        "model": "",
+        "label": "AI",
         "symbol": snapshot["symbol"],
         "timeframe": snapshot["timeframe"],
         "prior_count": len(prior),
@@ -297,7 +298,6 @@ def analyze_training_stream(
 
     answer_parts: list[str] = []
     try:
-        # Layered fallback (primary → spare model → free pool → fallbacks → openclaw).
         from web.ai_fallback import stream_with_fallbacks
 
         for kind, text in stream_with_fallbacks(resolved, messages):
@@ -317,8 +317,9 @@ def analyze_training_stream(
 
     record = {
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
-        "provider": resolved.provider,
-        "model": resolved.model,
+        # 落盘记录也不写实际模型/渠道。
+        "provider": "ai",
+        "model": "",
         "snapshot": {
             "symbol": snapshot["symbol"],
             "timeframe": snapshot["timeframe"],
@@ -336,9 +337,9 @@ def analyze_training_stream(
 
     yield {
         "type": "done",
-        "provider": resolved.provider,
-        "model": resolved.model,
-        "label": resolved.label,
+        "provider": "ai",
+        "model": "",
+        "label": "AI",
         "symbol": snapshot["symbol"],
         "timeframe": snapshot["timeframe"],
         "prior_count": len(prior),
