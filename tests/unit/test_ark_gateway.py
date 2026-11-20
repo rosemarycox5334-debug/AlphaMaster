@@ -143,8 +143,8 @@ def test_request_body_carries_ark_thinking(tmp_path):
     assert "temperature" not in body
 
 
-def test_fallback_order_ark_then_free_then_configured(monkeypatch):
-    """方舟失败后：先同网关模型池，再免费池，最后才是配置的备用通道。"""
+def test_fallback_order_free_then_ark_then_configured(monkeypatch):
+    """方舟地址下：先免费池，再方舟（主模型+同网关池），最后配置的备用通道。"""
     from web import ai_fallback as fb
 
     calls: list[tuple[str, str]] = []
@@ -177,14 +177,15 @@ def test_fallback_order_ark_then_free_then_configured(monkeypatch):
     except RuntimeError:
         pass  # 所有层都失败时会抛错，本测试只关心调用顺序
     kinds = [k for k, _ in calls]
+    assert kinds[0] == "free"
     assert "ark" in kinds
-    assert kinds.index("free") > max(i for i, k in enumerate(kinds) if k == "ark")
+    assert kinds.index("ark") > kinds.index("free")
     assert kinds[-1] == "fallback"
     assert any(kind == "notice" for kind, _ in events)
 
 
 def test_account_overdue_skips_ark_pool(monkeypatch):
-    """账号欠费时不应逐个试方舟模型，直接去免费池。"""
+    """账号欠费时：免费池试完后，方舟主模型直接失败、不再逐个试池内模型。"""
     from web import ai_fallback as fb
 
     calls: list[str] = []
@@ -204,4 +205,4 @@ def test_account_overdue_skips_ark_pool(monkeypatch):
 
     out = [v for k, v in fb.stream_with_fallbacks(_resolved(), [{"role": "user", "content": "hi"}]) if k == "text"]
     assert out == ["免费OK"]
-    assert calls == ["primary", "free"]
+    assert calls == ["free"]

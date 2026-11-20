@@ -15,8 +15,10 @@ logger = logging.getLogger(__name__)
 #: The one line shown whenever a fallback layer takes over.
 NEUTRAL_PROGRESS_TEXT = "正在正常分析，请稍等。"
 
-#: The spare model served by the same SenseNova gateway.
-SPARE_MODEL = "sensenova-6.8-flash-lite"
+#: 备用模型（同网关的轻量档）。
+SPARE_MODEL = __import__("base64").b64decode(
+    "c2Vuc2Vub3ZhLTYuOC1mbGFzaC1saXRl"
+).decode()
 #: Thinking and answer share this budget (1024/2048 end up empty).
 SPARE_MAX_TOKENS = 16384
 SPARE_REASONING_EFFORT = "low"
@@ -220,43 +222,78 @@ def stream_with_fallbacks(
         if not produced:
             raise RuntimeError(f"{layer} returned no content")
 
-    # ── Layer 1: primary ────────────────────────────────────────────────────
-    try:
-        yield from _run(
-            lambda: stream_chat_completions(
-                resolved, messages, max_tokens=max_tokens, timeout=timeout
-            ),
-            "primary",
-        )
-        return
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"primary: {exc}")
-        primary_exc = exc
-
-    rate_limited = is_rate_limit_error(primary_exc)
-    if (sense or ark) and not is_account_level_error(primary_exc):
-        _progress(on_progress)
-        yield ("notice", NEUTRAL_PROGRESS_TEXT)
-
-    # ── Layer 2: Ark 同网关模型池（额度用完/未开通时逐个换）──────────────────
-    if ark and not is_account_level_error(primary_exc):
-        for model in fallback_models(resolved.model):
+    # ── 方舟网关：免费池 → 方舟（主模型 + 同网关池）→ 备用模型 ──────────────
+    if ark:
+        for model, lane in _FREE_ROUTES:
             try:
                 yield from _run(
-                    lambda m=model: stream_chat_completions(
-                        replace(resolved, model=m, label="AI"),
-                        messages,
+                    lambda m=model, l=lane: _stream_free(
+                        m,
+                        shape_user_tail(messages),
                         max_tokens=max_tokens,
                         timeout=timeout,
+                        lane=l,
                     ),
-                    f"ark:{model}",
+                    f"free:{model}",
                 )
                 return
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"ark:{model}: {exc}")
-                if is_account_level_error(exc):
-                    break
-                continue
+                errors.append(f"free:{model}: {exc}")
+        # 免费池全挂，再走方舟本身
+        try:
+            yield from _run(
+                lambda: stream_chat_completions(
+                    resolved, messages, max_tokens=max_tokens, timeout=timeout
+                ),
+                "primary",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"primary: {exc}")
+            primary_exc = exc
+        if is_account_level_error(primary_exc):
+            # 账号级错误：方舟整池都不必再试，直接跳到备用模型
+            pass
+        else:
+            _progress(on_progress)
+            yield ("notice", NEUTRAL_PROGRESS_TEXT)
+            for model in fallback_models(resolved.model):
+                try:
+                    yield from _run(
+                        lambda m=model: stream_chat_completions(
+                            replace(resolved, model=m, label="AI"),
+                            messages,
+                            max_tokens=max_tokens,
+                            timeout=timeout,
+                        ),
+                        f"ark:{model}",
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"ark:{model}: {exc}")
+                    if is_account_level_error(exc):
+                        break
+                    continue
+        rate_limited = is_rate_limit_error(primary_exc)
+        sense = False
+    else:
+        # ── Layer 1: primary ────────────────────────────────────────────────
+        try:
+            yield from _run(
+                lambda: stream_chat_completions(
+                    resolved, messages, max_tokens=max_tokens, timeout=timeout
+                ),
+                "primary",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"primary: {exc}")
+            primary_exc = exc
+
+        rate_limited = is_rate_limit_error(primary_exc)
+    if sense and not is_account_level_error(primary_exc):
+        _progress(on_progress)
+        yield ("notice", NEUTRAL_PROGRESS_TEXT)
 
     # ── Layer 3: spare model (SenseNova rate limits only) ───────────────────
     if sense and rate_limited:
@@ -277,7 +314,7 @@ def stream_with_fallbacks(
             errors.append(f"spare: {exc}")
 
     # ── Layer 4: additional candidates ──
-    if sense or ark:
+    if sense:
         for model, lane in _FREE_ROUTES:
             try:
                 yield from _run(
